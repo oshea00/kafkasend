@@ -49,7 +49,7 @@ class RestApiClient:
             requests.RequestException: If request fails
         """
         url = f"{self.base_url.rstrip('/')}/{job.endpoint.lstrip('/')}"
-        method = job.method.value
+        method = job.method if isinstance(job.method, str) else job.method.value
 
         # Prepare headers
         headers = dict(job.headers)
