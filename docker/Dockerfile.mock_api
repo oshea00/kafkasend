@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install Flask
+RUN pip install --no-cache-dir flask structlog
+
+# Copy mock API script
+COPY docker/mock_api.py ./
+COPY src/ ./src/
+COPY pyproject.toml ./
+
+# Install the package for logging utilities
+RUN pip install --no-cache-dir -e .
+
+# Expose port
+EXPOSE 8080
+
+# Run the mock API
+CMD ["python", "mock_api.py"]

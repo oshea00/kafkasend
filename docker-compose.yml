@@ -1,0 +1,130 @@
+version: '3.8'
+
+services:
+  # Zookeeper - required for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    hostname: zookeeper
+    container_name: kafkasend-zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - kafkasend-network
+
+  # Kafka broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: kafkasend-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9093,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      # Increase max message size to support large files
+      KAFKA_MESSAGE_MAX_BYTES: 10485760
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760
+    networks:
+      - kafkasend-network
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9093", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Mock REST API for testing
+  mock-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mock_api
+    container_name: kafkasend-mock-api
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+    networks:
+      - kafkasend-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Portal service (Kafka to REST bridge)
+  portal:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.portal
+    container_name: kafkasend-portal
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mock-api:
+        condition: service_healthy
+    environment:
+      # Kafka configuration
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9093
+      KAFKA_REQUEST_TOPIC: api-requests
+      KAFKA_RESPONSE_TOPIC: api-responses
+      KAFKA_CONSUMER_GROUP: kafkasend-portal
+
+      # Portal configuration
+      PORTAL_TARGET_API_URL: http://mock-api:8080
+      PORTAL_USE_OAUTH: "false"
+      PORTAL_LOG_LEVEL: INFO
+      PORTAL_MAX_CONCURRENT_JOBS: 10
+      PORTAL_JOB_TIMEOUT_SECONDS: 300
+
+      # OAuth2 configuration (optional, not used with mock API)
+      # OAUTH2_TOKEN_URL: https://your-auth-server.com/oauth/token
+      # OAUTH2_CLIENT_ID: your-client-id
+      # OAUTH2_CLIENT_SECRET: your-client-secret
+      # OAUTH2_SCOPE: api.access
+      # OAUTH2_AUDIENCE: https://your-api.com
+    networks:
+      - kafkasend-network
+    restart: unless-stopped
+
+  # Client service (for running commands)
+  client:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.client
+    container_name: kafkasend-client
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      # Kafka configuration
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9093
+      KAFKA_REQUEST_TOPIC: api-requests
+      KAFKA_RESPONSE_TOPIC: api-responses
+
+      # Client configuration
+      CLIENT_LOG_LEVEL: INFO
+    volumes:
+      # Mount a directory for test files
+      - ./testdata:/testdata
+    networks:
+      - kafkasend-network
+    profiles:
+      - tools
+    stdin_open: true
+    tty: true
+
+networks:
+  kafkasend-network:
+    driver: bridge
