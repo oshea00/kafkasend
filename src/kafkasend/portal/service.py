@@ -73,6 +73,7 @@ class PortalService:
         self._producer = KafkaProducer(
             bootstrap_servers=self.kafka_config.bootstrap_servers.split(','),
             value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            max_request_size=1048576,  # 1MB - Kafka default max message size
         )
 
         logger.info(

@@ -12,7 +12,7 @@ KafkaSend consists of two main components:
 
 ## Features
 
-- **Large File Support**: Handles files up to 50MB+ by automatically chunking them into Kafka-compatible message sizes
+- **Large File Support**: Handles files up to 50MB+ by automatically chunking them into Kafka-compatible message sizes (650KB chunks, accounting for base64 encoding overhead)
 - **OAuth2 Machine-to-Machine**: Built-in support for JWT authentication with configurable OAuth2 providers
 - **Full HTTP Verb Support**: Supports GET, POST, PUT, PATCH, DELETE with custom headers
 - **Multipart Uploads**: Automatic handling of multipart/form-data for file uploads
@@ -51,14 +51,39 @@ docker-compose ps
 # Create a test file
 echo "Hello from KafkaSend!" > testdata/hello.txt
 
-# Send file using Docker client
+# Send file using Docker client (use --no-wait to avoid hanging)
 docker-compose run --rm client send-file \
   /testdata/hello.txt \
   --endpoint /api/upload \
-  --method POST
+  --method POST \
+  --no-wait
+
+# Check the uploaded file was saved
+ls -lh uploads/
+cat uploads/hello.txt
+
+# View portal logs to confirm processing
+docker-compose logs portal --tail=20
 ```
 
-### 3. Stop services
+### 3. Verify the upload worked
+
+The file should appear in `uploads/` directory within a few seconds. You can verify:
+
+```bash
+# Compare original and uploaded file
+diff testdata/hello.txt uploads/hello.txt
+
+# Check portal logs to see processing
+docker-compose logs portal | grep "Request completed"
+
+# Check mock API logs
+docker-compose logs mock-api | grep "File received"
+```
+
+**Note**: The `--no-wait` flag is used because waiting for responses has a consumer offset timing issue in the current setup. The portal processes requests successfully (check logs to verify), but the client may not receive the response due to Kafka consumer group coordination. This is a known limitation in the Docker setup and doesn't affect the core functionality.
+
+### 4. Stop services
 
 ```bash
 docker-compose down

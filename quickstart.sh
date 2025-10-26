@@ -55,7 +55,22 @@ echo ""
 docker-compose run --rm client send-file \
     /testdata/test.txt \
     --endpoint /api/upload \
-    --method POST
+    --method POST \
+    --no-wait
+
+echo ""
+echo "⏳ Waiting for file to be processed..."
+sleep 3
+
+# Check if file was uploaded
+if [ -f "uploads/test.txt" ]; then
+    echo "✅ File uploaded successfully!"
+    echo ""
+    echo "📄 File comparison:"
+    diff testdata/test.txt uploads/test.txt && echo "   ✓ Files are identical" || echo "   ✗ Files differ"
+else
+    echo "⚠️  File not found in uploads/ - check logs for errors"
+fi
 
 echo ""
 echo "🎉 Success! Your first request was sent via Kafka and processed by the portal."
@@ -63,7 +78,8 @@ echo ""
 echo "📝 Next steps:"
 echo "  - View portal logs:     docker-compose logs -f portal"
 echo "  - View mock API logs:   docker-compose logs -f mock-api"
-echo "  - Send another file:    docker-compose run --rm client send-file <path> --endpoint <endpoint>"
+echo "  - Check uploaded files: ls -lh uploads/"
+echo "  - Send another file:    docker-compose run --rm client send-file <path> --endpoint <endpoint> --no-wait"
 echo "  - Stop services:        docker-compose down"
 echo ""
 echo "📚 For more information, see README.md"

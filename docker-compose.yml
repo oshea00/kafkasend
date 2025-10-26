@@ -55,6 +55,9 @@ services:
       - "8080:8080"
     environment:
       PORT: 8080
+    volumes:
+      # Mount local uploads directory to container
+      - ./uploads:/uploads
     networks:
       - kafkasend-network
     healthcheck:

@@ -4,9 +4,17 @@ import base64
 from typing import Iterator, List
 
 
-# Kafka message size limit (conservative estimate)
-# Typical Kafka max message size is 1MB, we use 900KB to be safe
-MAX_CHUNK_SIZE = 900 * 1024  # 900 KB
+# Kafka message size limit calculation
+# Kafka default max message size is 1MB (1,048,576 bytes)
+# Base64 encoding increases size by ~33% (4 bytes for every 3 bytes)
+# JSON message wrapper adds additional overhead (~200-500 bytes)
+#
+# Calculation:
+# - Target final message size: 950KB (safety margin)
+# - Less JSON overhead: ~945KB for base64 data
+# - Divide by 1.333 (base64 expansion): ~709KB
+# - Use 650KB for safety: 650KB * 1.33 = ~866KB base64, ~870KB total
+MAX_CHUNK_SIZE = 650 * 1024  # 650 KB (before base64 encoding)
 
 
 def chunk_file(file_path: str, chunk_size: int = MAX_CHUNK_SIZE) -> Iterator[bytes]:

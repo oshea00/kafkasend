@@ -22,13 +22,21 @@ def upload():
 
     file = request.files['file']
     filename = file.filename
-    file_content = file.read()
-    file_size = len(file_content)
+
+    # Save file to uploads directory
+    upload_dir = '/uploads'
+    os.makedirs(upload_dir, exist_ok=True)
+    file_path = os.path.join(upload_dir, filename)
+    file.save(file_path)
+
+    # Get file size after saving
+    file_size = os.path.getsize(file_path)
 
     logger.info(
-        "File received",
+        "File received and saved",
         filename=filename,
         size=file_size,
+        saved_path=file_path,
         content_type=file.content_type
     )
 
@@ -36,6 +44,7 @@ def upload():
         'message': 'File uploaded successfully',
         'filename': filename,
         'size': file_size,
+        'saved_path': file_path,
         'content_type': file.content_type,
         'received_headers': dict(request.headers)
     }), 200

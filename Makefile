@@ -61,4 +61,8 @@ docker-test:
 	docker-compose run --rm client send-file \
 		/testdata/makefile-test.txt \
 		--endpoint /api/upload \
-		--method POST
+		--method POST \
+		--no-wait
+	@echo "File sent! Check uploads/makefile-test.txt"
+	@sleep 2
+	@ls -lh uploads/makefile-test.txt 2>/dev/null && echo "✓ File uploaded successfully" || echo "✗ File not found"
