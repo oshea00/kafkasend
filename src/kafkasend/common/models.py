@@ -2,7 +2,7 @@
 
 from enum import Enum
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class HttpMethod(str, Enum):
@@ -47,8 +47,7 @@ class KafkaRequestMessage(BaseModel):
     # Error details
     error_message: Optional[str] = Field(None, description="Error description")
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class KafkaResponseMessage(BaseModel):
@@ -70,5 +69,4 @@ class KafkaResponseMessage(BaseModel):
     # Error details
     error_message: Optional[str] = Field(None, description="Error description")
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)

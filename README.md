@@ -131,6 +131,10 @@ kafkasend-client send-file /path/to/file.pdf --endpoint /api/upload
 - `KAFKA_BOOTSTRAP_SERVERS`: Kafka broker addresses (default: localhost:9092)
 - `KAFKA_REQUEST_TOPIC`: Topic for requests (default: api-requests)
 - `KAFKA_RESPONSE_TOPIC`: Topic for responses (default: api-responses)
+- `KAFKA_CONSUMER_GROUP`: Consumer group ID (default: kafkasend-portal)
+- `KAFKA_SESSION_TIMEOUT_MS`: Consumer session timeout in ms (default: 300000 = 5 minutes)
+- `KAFKA_MAX_POLL_INTERVAL_MS`: Max time between poll() calls in ms (default: 1200000 = 20 minutes)
+- `KAFKA_REQUEST_TIMEOUT_MS`: Kafka operation timeout in ms (default: 120000 = 2 minutes)
 
 ### Portal Configuration
 
@@ -138,6 +142,11 @@ kafkasend-client send-file /path/to/file.pdf --endpoint /api/upload
 - `PORTAL_USE_OAUTH`: Enable OAuth2 (default: true)
 - `PORTAL_LOG_LEVEL`: Logging level (default: INFO)
 - `PORTAL_MAX_CONCURRENT_JOBS`: Max concurrent jobs (default: 10)
+- `PORTAL_JOB_TIMEOUT_SECONDS`: HTTP request timeout in seconds (default: 900 = 15 minutes)
+- `PORTAL_JOB_MAX_AGE_SECONDS`: Max job age before cleanup in seconds (default: 900 = 15 minutes)
+- `PORTAL_ALLOWED_ENDPOINTS`: Comma-separated endpoint whitelist patterns (default: "" = block all in strict mode)
+- `PORTAL_ALLOWED_HEADERS`: Comma-separated allowed header names (default: "Content-Type,Accept,X-Request-ID,X-Correlation-ID")
+- `PORTAL_STRICT_SECURITY`: Enable strict security mode (default: true)
 
 ### OAuth2 Configuration
 
@@ -146,6 +155,101 @@ kafkasend-client send-file /path/to/file.pdf --endpoint /api/upload
 - `OAUTH2_CLIENT_SECRET`: Client secret (required)
 - `OAUTH2_SCOPE`: OAuth2 scope (optional)
 - `OAUTH2_AUDIENCE`: Token audience (optional)
+
+### Long-Running Request Support
+
+KafkaSend is designed to handle REST API requests that take up to 15 minutes to complete. The timeout configuration ensures proper handling:
+
+- **HTTP Request Timeout**: 15 minutes (`PORTAL_JOB_TIMEOUT_SECONDS=900`)
+- **Job Cleanup Timeout**: 15 minutes (`PORTAL_JOB_MAX_AGE_SECONDS=900`)
+- **Kafka Max Poll Interval**: 20 minutes (`KAFKA_MAX_POLL_INTERVAL_MS=1200000`)
+
+The portal service remains connected to Kafka during long REST requests by sending heartbeats every 3 seconds. Jobs that exceed the timeout are automatically cleaned up and an error response is sent to the client.
+
+For REST APIs that may take longer than 15 minutes, adjust these environment variables:
+
+```bash
+# Example: 30-minute timeout
+PORTAL_JOB_TIMEOUT_SECONDS=1800
+PORTAL_JOB_MAX_AGE_SECONDS=1800
+KAFKA_MAX_POLL_INTERVAL_MS=2400000  # 40 minutes (30 min + buffer)
+```
+
+See [PROTOCOL.md](PROTOCOL.md#timeouts) for detailed timeout configuration guidance.
+
+## Security
+
+KafkaSend implements multiple security controls to prevent abuse by compromised or malicious clients.
+
+### Security Features
+
+- **Endpoint Whitelisting**: Only allows requests to specific API endpoints
+- **Header Filtering**: Blocks unauthorized headers (Authorization, Cookie, etc.)
+- **SSRF Protection**: Prevents access to internal services and metadata endpoints
+- **Strict Mode**: Configurable enforcement of security policies
+
+### Security Configuration
+
+Configure security settings via environment variables:
+
+```bash
+# Endpoint whitelist (comma-separated patterns, supports wildcards)
+PORTAL_ALLOWED_ENDPOINTS="/api/upload,/api/documents/*"
+
+# Header whitelist (comma-separated header names)
+PORTAL_ALLOWED_HEADERS="Content-Type,X-Request-ID,X-Correlation-ID"
+
+# Strict security mode (true = reject violations, false = log only)
+PORTAL_STRICT_SECURITY=true
+```
+
+### Production Security Recommendations
+
+1. **Always use endpoint whitelisting** - Never deploy with empty `PORTAL_ALLOWED_ENDPOINTS` in production
+2. **Minimize allowed headers** - Only whitelist headers your API actually needs
+3. **Enable strict mode** - Set `PORTAL_STRICT_SECURITY=true`
+4. **Enable Kafka TLS** - Use encrypted connections to Kafka brokers
+5. **Enable OAuth2** - Require authentication for all REST API requests
+6. **Network isolation** - Run portal in isolated network segment
+7. **Monitor logs** - Alert on security validation failures
+
+### Example: Secure Production Configuration
+
+```bash
+# Target API
+PORTAL_TARGET_API_URL=https://api.production.example.com
+
+# Security: Strict whitelist
+PORTAL_ALLOWED_ENDPOINTS="/api/v1/upload,/api/v1/documents/*"
+PORTAL_ALLOWED_HEADERS="Content-Type,X-Request-ID"
+PORTAL_STRICT_SECURITY=true
+
+# OAuth2 Authentication
+PORTAL_USE_OAUTH=true
+OAUTH2_TOKEN_URL=https://auth.example.com/oauth/token
+OAUTH2_CLIENT_ID=portal-service
+OAUTH2_CLIENT_SECRET=<secret>
+
+# Kafka with TLS
+KAFKA_BOOTSTRAP_SERVERS=kafka-broker:9093
+```
+
+### Security Testing
+
+The project includes comprehensive security tests:
+
+```bash
+# Run security tests
+pytest tests/test_security.py -v
+
+# Expected results:
+# - Whitelisted endpoints pass
+# - Non-whitelisted endpoints blocked
+# - Forbidden headers removed
+# - SSRF patterns blocked
+```
+
+See [PROTOCOL.md Security Considerations](PROTOCOL.md#security-considerations) for detailed security documentation.
 
 ## Project Structure
 

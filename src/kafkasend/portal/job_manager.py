@@ -1,7 +1,8 @@
 """Manages in-progress jobs and chunk accumulation."""
 
 import io
-from typing import Dict, List, Optional
+import time
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import structlog
 
@@ -26,6 +27,10 @@ class JobState:
     total_chunks: Optional[int] = None
     received_chunks: int = 0
 
+    # Timestamp tracking for timeout management
+    created_at: float = field(default_factory=time.time)
+    last_activity: float = field(default_factory=time.time)
+
     def add_chunk(self, sequence: int, data: bytes) -> None:
         """
         Add a chunk to the job.
@@ -37,6 +42,7 @@ class JobState:
         if sequence not in self.chunks:
             self.chunks[sequence] = data
             self.received_chunks += 1
+            self.last_activity = time.time()
             logger.debug(
                 "Chunk added",
                 job_id=self.job_id,
@@ -44,6 +50,14 @@ class JobState:
                 received=self.received_chunks,
                 total=self.total_chunks
             )
+
+    def age_seconds(self) -> float:
+        """Get the age of this job in seconds."""
+        return time.time() - self.created_at
+
+    def idle_seconds(self) -> float:
+        """Get the time since last activity in seconds."""
+        return time.time() - self.last_activity
 
     def is_complete(self) -> bool:
         """Check if all chunks have been received."""
@@ -203,3 +217,34 @@ class JobManager:
     def get_active_job_count(self) -> int:
         """Get the number of active jobs."""
         return len(self._jobs)
+
+    def cleanup_stale_jobs(self, max_age_seconds: float) -> List[Tuple[str, str]]:
+        """
+        Clean up jobs that have exceeded the maximum age.
+
+        Args:
+            max_age_seconds: Maximum age in seconds before a job is considered stale
+
+        Returns:
+            List of (job_id, reason) tuples for cleaned up jobs
+        """
+        stale_jobs = []
+        current_time = time.time()
+
+        for job_id, job in list(self._jobs.items()):
+            age = job.age_seconds()
+            idle = job.idle_seconds()
+
+            if age > max_age_seconds:
+                stale_jobs.append((job_id, f"Job exceeded max age: {age:.1f}s > {max_age_seconds}s"))
+                del self._jobs[job_id]
+                logger.warning(
+                    "Job cleaned up: exceeded max age",
+                    job_id=job_id,
+                    age_seconds=age,
+                    max_age_seconds=max_age_seconds,
+                    received_chunks=job.received_chunks,
+                    total_chunks=job.total_chunks
+                )
+
+        return stale_jobs

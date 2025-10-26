@@ -89,7 +89,19 @@ services:
       PORTAL_USE_OAUTH: "false"
       PORTAL_LOG_LEVEL: INFO
       PORTAL_MAX_CONCURRENT_JOBS: 10
-      PORTAL_JOB_TIMEOUT_SECONDS: 300
+      PORTAL_JOB_TIMEOUT_SECONDS: 900  # 15 minutes
+      PORTAL_JOB_MAX_AGE_SECONDS: 900  # 15 minutes
+
+      # Security configuration (permissive for testing - lock down for production)
+      # For testing: Allow all endpoints to mock API
+      PORTAL_ALLOWED_ENDPOINTS: "/api/*,/health"
+      PORTAL_ALLOWED_HEADERS: "Content-Type,Accept,X-Request-ID,X-Correlation-ID"
+      PORTAL_STRICT_SECURITY: "true"
+
+      # Production security example:
+      # PORTAL_ALLOWED_ENDPOINTS: "/api/v1/upload,/api/v1/documents/*"
+      # PORTAL_ALLOWED_HEADERS: "Content-Type,X-Request-ID"
+      # PORTAL_STRICT_SECURITY: "true"
 
       # OAuth2 configuration (optional, not used with mock API)
       # OAUTH2_TOKEN_URL: https://your-auth-server.com/oauth/token

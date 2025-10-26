@@ -115,6 +115,97 @@ graph TD
     style B5 fill:#e1f5ff,stroke:#01579b
 ```
 
+## Multi-Instance Scaling with Partition Key Routing
+
+KafkaSend supports running multiple portal instances for high availability and load distribution. To prevent multiple portals from processing chunks of the same job, we use **partition key routing** based on the job ID.
+
+### How It Works
+
+```mermaid
+graph TB
+    subgraph "Client"
+        C[Client CLI<br/>job_id: abc-123]
+    end
+
+    subgraph "Kafka Topics"
+        KR[api-requests<br/>Partitions 0,1,2]
+        KS[api-responses<br/>Partitions 0,1,2]
+    end
+
+    subgraph "Portal Instances"
+        P1[Portal 1<br/>Partition 0]
+        P2[Portal 2<br/>Partition 1]
+        P3[Portal 3<br/>Partition 2]
+    end
+
+    subgraph "REST API"
+        API[REST API Server]
+    end
+
+    C -->|key=job_id<br/>→ Partition 1| KR
+    KR -->|Consumer Group<br/>Partition Assignment| P2
+    P2 --> API
+    API --> P2
+    P2 -->|key=job_id<br/>→ Partition 1| KS
+    KS --> C
+
+    style C fill:#e1f5ff,stroke:#01579b,stroke-width:2px
+    style P2 fill:#fff3e0,stroke:#e65100,stroke-width:3px
+    style P1 fill:#f5f5f5,stroke:#999,stroke-dasharray: 5 5
+    style P3 fill:#f5f5f5,stroke:#999,stroke-dasharray: 5 5
+    style API fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+```
+
+### Key Guarantees
+
+1. **Job Affinity**: All messages with the same `job_id` are routed to the same Kafka partition using the job ID as the partition key
+2. **Single Consumer**: Kafka's consumer group mechanism ensures each partition is assigned to only one portal instance
+3. **Message Ordering**: Kafka guarantees message order within a partition, ensuring chunks arrive in sequence
+4. **Load Distribution**: Different jobs (with different job IDs) are distributed across partitions and portal instances
+5. **Fault Tolerance**: If a portal instance fails, Kafka rebalances partitions to surviving instances
+
+### Implementation Details
+
+**Client-side** (`sender.py`):
+```python
+self._producer.send(
+    self.kafka_config.request_topic,
+    key=message.job_id.encode('utf-8'),  # Partition key
+    value=message.model_dump()
+)
+```
+
+**Portal-side** (`service.py`):
+```python
+self._producer.send(
+    self.kafka_config.response_topic,
+    key=message.job_id.encode('utf-8'),  # Partition key
+    value=message.model_dump()
+)
+```
+
+### Benefits
+
+- **Prevents Race Conditions**: No two portal instances will process chunks from the same job
+- **Scalability**: Add more portal instances to handle increased load
+- **High Availability**: Jobs automatically reassigned if an instance fails
+- **Performance**: Jobs processed in parallel across multiple instances
+
+### Configuration
+
+To enable multi-instance deployment, simply run multiple portal containers with the same consumer group ID:
+
+```yaml
+# docker-compose.yml
+portal-1:
+  environment:
+    KAFKA_CONSUMER_GROUP: portal-service-group  # Same group
+
+portal-2:
+  environment:
+    KAFKA_CONSUMER_GROUP: portal-service-group  # Same group
+```
+
 ## Protocol Flow
 
 ### Single-Chunk Upload (Small File)
@@ -565,8 +656,127 @@ stateDiagram-v2
 
 ### Timeouts
 
-- **Job Timeout**: 300 seconds (configurable via `PORTAL_JOB_TIMEOUT_SECONDS`)
-- **Kafka Session**: 30 seconds (configurable via `KAFKA_SESSION_TIMEOUT_MS`)
+KafkaSend implements multiple timeout layers to handle long-running REST API requests (up to 15 minutes) while maintaining Kafka consumer health.
+
+#### HTTP Request Timeout
+
+- **Default**: 900 seconds (15 minutes)
+- **Environment Variable**: `PORTAL_JOB_TIMEOUT_SECONDS`
+- **Purpose**: Maximum time to wait for REST API response
+- **Behavior**: If REST API doesn't respond within this time, request fails with timeout error
+
+```python
+# config.py
+job_timeout_seconds: int = 900  # 15 minutes
+```
+
+#### Job Cleanup Timeout
+
+- **Default**: 900 seconds (15 minutes)
+- **Environment Variable**: `PORTAL_JOB_MAX_AGE_SECONDS`
+- **Purpose**: Maximum age of a job before it's cleaned up as stale
+- **Behavior**: Portal checks every 60 seconds and removes jobs older than this limit
+- **Response**: Sends ERROR message back to client with timeout reason
+
+```python
+# config.py
+job_max_age_seconds: int = 900  # 15 minutes
+```
+
+#### Kafka Consumer Timeouts
+
+**Session Timeout:**
+- **Default**: 300000 ms (5 minutes)
+- **Environment Variable**: `KAFKA_SESSION_TIMEOUT_MS`
+- **Purpose**: How long before consumer is considered dead by broker
+- **Requirement**: Must send heartbeats within this interval
+
+**Max Poll Interval:**
+- **Default**: 1200000 ms (20 minutes)
+- **Environment Variable**: `KAFKA_MAX_POLL_INTERVAL_MS`
+- **Purpose**: Maximum time between poll() calls before consumer is kicked out
+- **Requirement**: Must be longer than `job_timeout_seconds` to allow for long REST requests
+- **Why 20 minutes**: Allows 15-minute request + 5-minute buffer
+
+**Request Timeout:**
+- **Default**: 120000 ms (2 minutes)
+- **Environment Variable**: `KAFKA_REQUEST_TIMEOUT_MS`
+- **Purpose**: Timeout for individual Kafka producer/consumer operations
+
+```python
+# config.py
+session_timeout_ms: int = 300000        # 5 minutes
+max_poll_interval_ms: int = 1200000     # 20 minutes
+request_timeout_ms: int = 120000        # 2 minutes
+```
+
+#### Timeout Interaction
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant K as Kafka
+    participant P as Portal
+    participant A as REST API
+
+    Note over P: Job created at T=0
+    C->>K: START message
+    K->>P: Consume (T=0)
+    P->>A: HTTP POST (timeout=900s)
+
+    Note over P: Heartbeats sent every 3s<br/>to keep session alive
+
+    rect rgb(255, 245, 230)
+        Note over A: API processing...<br/>Takes 10 minutes
+    end
+
+    alt Request completes within 15 minutes
+        A-->>P: Response (T=600s)
+        P->>K: Response message
+        K->>C: Consume response
+    else Request exceeds 15 minutes
+        A-->>P: Timeout (T=900s)
+        P->>K: ERROR message<br/>"Request timeout"
+    end
+
+    Note over P: Cleanup check at T=960s<br/>Job age = 960s > 900s
+    P->>P: Remove stale job
+    P->>K: ERROR message<br/>"Job timeout: exceeded max age"
+```
+
+#### Configuration Guidelines
+
+For long-running REST APIs:
+
+1. **Set HTTP timeout** based on expected API response time:
+   ```bash
+   PORTAL_JOB_TIMEOUT_SECONDS=900  # 15 minutes
+   ```
+
+2. **Set job cleanup timeout** same or slightly higher than HTTP timeout:
+   ```bash
+   PORTAL_JOB_MAX_AGE_SECONDS=900  # 15 minutes
+   ```
+
+3. **Set max poll interval** higher than job timeout:
+   ```bash
+   KAFKA_MAX_POLL_INTERVAL_MS=1200000  # 20 minutes (15 min + buffer)
+   ```
+
+4. **Keep session timeout reasonable** for failure detection:
+   ```bash
+   KAFKA_SESSION_TIMEOUT_MS=300000  # 5 minutes
+   ```
+
+#### Timeout Error Messages
+
+Clients may receive timeout errors in the following scenarios:
+
+| Scenario | Error Message | Cause |
+|----------|--------------|-------|
+| HTTP timeout | `Request timeout: The read operation timed out` | REST API didn't respond within `job_timeout_seconds` |
+| Job cleanup | `Job timeout: Job exceeded max age: 905.3s > 900s` | Job existed longer than `job_max_age_seconds` |
+| Network issue | `Connection timeout` | Unable to connect to REST API |
 
 ## Best Practices
 
@@ -596,11 +806,185 @@ stateDiagram-v2
 
 ## Security Considerations
 
-- **Job IDs are UUIDs**: Hard to guess, provides some isolation
-- **OAuth2 tokens**: Securely managed and auto-refreshed
-- **No data persistence**: Chunks stored in memory only
-- **Kafka ACLs**: Should be configured for production
+KafkaSend implements multiple security layers to prevent abuse of the portal service by compromised or malicious clients.
+
+### Threat Model
+
+The primary security concerns are:
+
+1. **SSRF (Server-Side Request Forgery)**: Malicious clients using the portal to access internal services, cloud metadata endpoints, or perform network scanning
+2. **Header Injection**: Clients injecting malicious headers or overriding OAuth headers
+3. **Endpoint Abuse**: Clients accessing unintended API endpoints
+4. **Data Exfiltration**: Using the portal to proxy requests to arbitrary destinations
+
+### Security Controls
+
+#### 1. Endpoint Whitelisting
+
+The portal validates all requested endpoints against a configurable whitelist.
+
+**Configuration:**
+```bash
+# Comma-separated list of allowed endpoint patterns (supports wildcards)
+PORTAL_ALLOWED_ENDPOINTS="/api/upload,/api/documents/*,/v1/*/process"
+```
+
+**Behavior:**
+- Exact matches: `/api/upload` allows only that specific endpoint
+- Wildcard patterns: `/api/documents/*` allows `/api/documents/123`, `/api/documents/xyz/view`
+- Empty string in strict mode: Blocks all requests (secure default)
+- Empty string in permissive mode: Allows all (NOT RECOMMENDED for production)
+
+**Example:**
+```python
+# Valid requests
+/api/upload                    # Exact match
+/api/documents/123             # Wildcard match
+/api/documents/abc/metadata    # Wildcard match
+
+# Blocked requests
+/admin/users                   # Not in whitelist
+/api/delete-all                # Not in whitelist
+```
+
+#### 2. Header Whitelisting
+
+The portal filters client headers, only allowing specific headers through to the target API.
+
+**Configuration:**
+```bash
+# Comma-separated list of allowed header names (case-insensitive)
+PORTAL_ALLOWED_HEADERS="Content-Type,Accept,X-Request-ID,X-Correlation-ID"
+```
+
+**Forbidden Headers (Always Blocked):**
+- `Authorization` - OAuth tokens managed by portal, not clients
+- `Proxy-Authorization` - Proxy auth should not be controllable by clients
+- `Cookie` - Session cookies should not be forwarded
+- `X-Forwarded-For` - Network routing headers
+- `X-Real-IP` - Network routing headers
+- `Host` - Target host controlled by portal configuration
+
+**Behavior:**
+- Case-insensitive matching: `Content-Type`, `content-type`, `CONTENT-TYPE` all match
+- Forbidden headers always blocked regardless of whitelist
+- Unknown headers silently removed
+- Empty whitelist: Blocks all client headers (recommended default)
+
+#### 3. SSRF Protection
+
+The portal automatically blocks known SSRF target patterns:
+
+**Blocked Patterns:**
+- `127.0.0.1` / `localhost` / `::1` - Loopback addresses
+- `169.254.169.254` - AWS/Azure/GCP metadata endpoints
+- `0.0.0.0` - Any address
+- `10.*.*.*` - Private network (Class A)
+- `172.16.*.*` through `172.31.*.*` - Private network (Class B)
+- `192.168.*.*` - Private network (Class C)
+- `*.local` / `*.internal` - Internal DNS names
+
+**Note:** SSRF checks are applied to the endpoint path, not the target API base URL (which is controlled by `PORTAL_TARGET_API_URL`).
+
+#### 4. Strict Mode
+
+Controls whether validation failures block requests or only log warnings.
+
+**Configuration:**
+```bash
+PORTAL_STRICT_SECURITY=true  # Recommended for production
+```
+
+**Strict Mode (true):**
+- Invalid endpoints → Request rejected with error
+- No whitelist configured → All requests rejected
+- Security violation → Logged and blocked
+
+**Permissive Mode (false):**
+- Invalid endpoints → Logged as warning, request allowed
+- No whitelist → Logged as warning, all requests allowed
+- **Use only for development/testing**
+
+### Security Configuration Examples
+
+#### Production (Secure)
+
+```bash
+# Strict whitelist for specific endpoints
+PORTAL_ALLOWED_ENDPOINTS="/api/v1/upload,/api/v1/documents/*"
+PORTAL_ALLOWED_HEADERS="Content-Type,X-Request-ID"
+PORTAL_STRICT_SECURITY=true
+```
+
+#### Development (Less Strict)
+
+```bash
+# Broader whitelist for testing
+PORTAL_ALLOWED_ENDPOINTS="/api/*"
+PORTAL_ALLOWED_HEADERS="Content-Type,Accept,X-Debug-*"
+PORTAL_STRICT_SECURITY=true
+```
+
+#### Testing (Permissive - NOT for Production)
+
+```bash
+# Allow all endpoints and headers (insecure)
+PORTAL_ALLOWED_ENDPOINTS=""
+PORTAL_ALLOWED_HEADERS=""
+PORTAL_STRICT_SECURITY=false
+```
+
+### Security Logging
+
+All security events are logged with structured logging:
+
+```json
+{
+  "event": "security_validation",
+  "job_id": "abc-123",
+  "endpoint": "/admin/users",
+  "result": "blocked",
+  "reason": "Endpoint '/admin/users' not in whitelist: ['/api/upload', '/api/documents/*']"
+}
+```
+
+**Logged Events:**
+- Endpoint validation failures
+- Header filtering (removed headers)
+- SSRF attempt detection
+- Forbidden header blocking
+- Security configuration warnings
+
+### Additional Security Best Practices
+
+- **Job IDs are UUIDs**: Hard to guess, provides isolation between jobs
+- **OAuth2 tokens**: Managed by portal, clients cannot override
+- **No data persistence**: Chunks stored in memory only, no disk traces
+- **Kafka ACLs**: Configure Kafka topic ACLs for production
 - **TLS/SSL**: Enable for production Kafka and HTTP traffic
+- **Network isolation**: Run portal in isolated network segment
+- **Rate limiting**: Consider implementing rate limits per client
+- **Audit logging**: Enable comprehensive audit logs for compliance
+
+### Security Testing
+
+Test security controls before production deployment:
+
+```bash
+# Test 1: Attempt to access blocked endpoint
+# Expected: Request rejected
+
+# Test 2: Send forbidden headers (Authorization, Cookie)
+# Expected: Headers silently removed
+
+# Test 3: Try SSRF targets (localhost, 169.254.169.254)
+# Expected: Request rejected with SSRF warning
+
+# Test 4: Verify whitelist patterns work correctly
+# Expected: Only whitelisted endpoints succeed
+```
+
+See `tests/test_security.py` for comprehensive security test cases.
 
 ## Performance Characteristics
 

@@ -189,8 +189,11 @@ class KafkaSender:
         Args:
             message: Request message to send
         """
+        # Use job_id as partition key to ensure all messages for the same job
+        # go to the same partition (and thus the same portal instance)
         self._producer.send(
             self.kafka_config.request_topic,
+            key=message.job_id.encode('utf-8'),
             value=message.model_dump()
         )
         self._producer.flush()

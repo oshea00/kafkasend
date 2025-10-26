@@ -3,6 +3,7 @@
 import json
 import signal
 import sys
+import time
 from typing import Optional
 from kafka import KafkaConsumer, KafkaProducer
 import structlog
@@ -17,6 +18,7 @@ from kafkasend.common.logging import configure_logging
 from kafkasend.common.chunking import encode_chunk, MAX_CHUNK_SIZE
 from kafkasend.portal.job_manager import JobManager
 from kafkasend.portal.rest_client import RestApiClient
+from kafkasend.portal.security import SecurityValidator
 
 logger = structlog.get_logger(__name__)
 
@@ -45,10 +47,12 @@ class PortalService:
             max_concurrent_jobs=portal_config.max_concurrent_jobs
         )
         self.rest_client = RestApiClient(portal_config, oauth_config)
+        self.security_validator = SecurityValidator(portal_config)
 
         self._running = False
         self._consumer: Optional[KafkaConsumer] = None
         self._producer: Optional[KafkaProducer] = None
+        self._last_cleanup_time = time.time()
 
     def start(self) -> None:
         """Start the portal service."""
@@ -66,6 +70,8 @@ class PortalService:
             auto_offset_reset=self.kafka_config.auto_offset_reset,
             value_deserializer=lambda m: json.loads(m.decode('utf-8')),
             session_timeout_ms=self.kafka_config.session_timeout_ms,
+            max_poll_interval_ms=self.kafka_config.max_poll_interval_ms,
+            request_timeout_ms=self.kafka_config.request_timeout_ms,
             max_poll_records=self.kafka_config.max_poll_records,
         )
 
@@ -87,7 +93,11 @@ class PortalService:
 
     def _run(self) -> None:
         """Main event loop."""
-        logger.info("Portal service running, waiting for messages...")
+        logger.info(
+            "Portal service running, waiting for messages...",
+            job_timeout_seconds=self.portal_config.job_timeout_seconds,
+            job_max_age_seconds=self.portal_config.job_max_age_seconds
+        )
 
         while self._running:
             try:
@@ -97,6 +107,12 @@ class PortalService:
                 for topic_partition, records in messages.items():
                     for record in records:
                         self._handle_message(record.value)
+
+                # Periodic cleanup of stale jobs (every 60 seconds)
+                current_time = time.time()
+                if current_time - self._last_cleanup_time >= 60:
+                    self._cleanup_stale_jobs()
+                    self._last_cleanup_time = current_time
 
             except Exception as e:
                 logger.error("Error in main loop", error=str(e), exc_info=True)
@@ -143,6 +159,35 @@ class PortalService:
     def _handle_start(self, message: KafkaRequestMessage) -> None:
         """Handle START message."""
         try:
+            # Validate endpoint and headers before processing
+            is_valid, error_msg, filtered_headers = self.security_validator.validate_request(
+                endpoint=message.endpoint or "",
+                headers=message.headers or {}
+            )
+
+            if not is_valid:
+                logger.warning(
+                    "Request rejected by security validation",
+                    job_id=message.job_id,
+                    endpoint=message.endpoint,
+                    error=error_msg
+                )
+                self._send_error_response(
+                    message.job_id,
+                    f"Security validation failed: {error_msg}"
+                )
+                return
+
+            # Replace headers with filtered headers
+            if filtered_headers != message.headers:
+                logger.info(
+                    "Headers filtered by security policy",
+                    job_id=message.job_id,
+                    original_count=len(message.headers or {}),
+                    filtered_count=len(filtered_headers)
+                )
+                message.headers = filtered_headers
+
             job = self.job_manager.start_job(message)
 
             # If no chunks expected (total_chunks == 0), execute immediately
@@ -291,6 +336,35 @@ class PortalService:
         self._send_kafka_message(message)
         logger.info("Error response sent", job_id=job_id)
 
+    def _cleanup_stale_jobs(self) -> None:
+        """Clean up jobs that have exceeded the maximum age and send timeout responses."""
+        stale_jobs = self.job_manager.cleanup_stale_jobs(
+            max_age_seconds=self.portal_config.job_max_age_seconds
+        )
+
+        for job_id, reason in stale_jobs:
+            error_message = f"Job timeout: {reason}"
+            try:
+                self._send_error_response(job_id, error_message)
+                logger.warning(
+                    "Timeout response sent for stale job",
+                    job_id=job_id,
+                    reason=reason
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to send timeout response",
+                    job_id=job_id,
+                    error=str(e)
+                )
+
+        if stale_jobs:
+            logger.info(
+                "Stale job cleanup completed",
+                cleaned_up_count=len(stale_jobs),
+                active_jobs=self.job_manager.get_active_job_count()
+            )
+
     def _send_kafka_message(self, message: KafkaResponseMessage) -> None:
         """
         Send a message to Kafka response topic.
@@ -301,8 +375,11 @@ class PortalService:
         if not self._producer:
             raise RuntimeError("Producer not initialized")
 
+        # Use job_id as partition key to ensure all response messages for the same job
+        # go to the same partition (maintains message ordering)
         self._producer.send(
             self.kafka_config.response_topic,
+            key=message.job_id.encode('utf-8'),
             value=message.model_dump()
         )
         self._producer.flush()
