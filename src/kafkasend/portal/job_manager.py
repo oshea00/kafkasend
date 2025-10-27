@@ -2,6 +2,7 @@
 
 import io
 import time
+import zlib
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import structlog
@@ -22,6 +23,7 @@ class JobState:
     headers: Dict[str, str] = field(default_factory=dict)
     filename: Optional[str] = None
     content_type: Optional[str] = None
+    expected_crc32: Optional[int] = None
 
     chunks: Dict[int, bytes] = field(default_factory=dict)
     total_chunks: Optional[int] = None
@@ -67,17 +69,42 @@ class JobState:
 
     def get_complete_data(self) -> bytes:
         """
-        Reassemble all chunks into complete data.
+        Reassemble all chunks into complete data and verify CRC32 checksum.
 
         Returns:
             Complete binary data
+
+        Raises:
+            ValueError: If job is incomplete or CRC32 verification fails
         """
         if not self.is_complete():
             raise ValueError(f"Job {self.job_id} is not complete")
 
         # Sort chunks by sequence and reassemble
         sorted_chunks = [self.chunks[i] for i in sorted(self.chunks.keys())]
-        return reassemble_chunks(sorted_chunks)
+        complete_data = reassemble_chunks(sorted_chunks)
+
+        # Verify CRC32 checksum if provided
+        if self.expected_crc32 is not None:
+            actual_crc32 = zlib.crc32(complete_data) & 0xffffffff
+            if actual_crc32 != self.expected_crc32:
+                logger.error(
+                    "CRC32 verification failed",
+                    job_id=self.job_id,
+                    expected_crc32=self.expected_crc32,
+                    actual_crc32=actual_crc32
+                )
+                raise ValueError(
+                    f"CRC32 checksum mismatch for job {self.job_id}: "
+                    f"expected {self.expected_crc32}, got {actual_crc32}"
+                )
+            logger.info(
+                "CRC32 verification passed",
+                job_id=self.job_id,
+                crc32=actual_crc32
+            )
+
+        return complete_data
 
 
 class JobManager:
@@ -124,6 +151,7 @@ class JobManager:
             headers=message.headers or {},
             filename=message.filename,
             content_type=message.content_type,
+            expected_crc32=message.crc32,
             total_chunks=message.total_chunks,
         )
 
@@ -134,7 +162,8 @@ class JobManager:
             job_id=message.job_id,
             method=message.method,
             endpoint=message.endpoint,
-            total_chunks=message.total_chunks
+            total_chunks=message.total_chunks,
+            crc32=message.crc32
         )
 
         return job

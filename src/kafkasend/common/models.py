@@ -40,6 +40,7 @@ class KafkaRequestMessage(BaseModel):
     # File/data details
     filename: Optional[str] = Field(None, description="Original filename")
     content_type: Optional[str] = Field(None, description="Content type of the file")
+    crc32: Optional[int] = Field(None, description="CRC32 checksum of complete data for integrity verification")
 
     # Chunk data (base64 encoded)
     data: Optional[str] = Field(None, description="Base64 encoded chunk data")

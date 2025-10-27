@@ -10,6 +10,7 @@ KafkaSend uses a chunked message protocol to enable large file transfers (up to 
 - Job-based request/response correlation
 - Multiple HTTP methods (GET, POST, PUT, PATCH, DELETE)
 - Custom headers and multipart file uploads
+- CRC32 checksum validation for data integrity
 - Error handling and status reporting
 
 ## Architecture
@@ -114,6 +115,125 @@ graph TD
     style B3 fill:#fff3e0,stroke:#e65100
     style B5 fill:#e1f5ff,stroke:#01579b
 ```
+
+## Data Integrity with CRC32 Checksums
+
+KafkaSend implements **CRC32 checksum validation** to ensure data integrity during chunked file transfers. This protects against data corruption that may occur during:
+- Message serialization/deserialization
+- Network transmission
+- Chunk reassembly
+- Base64 encoding/decoding
+
+### How It Works
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant K as Kafka
+    participant P as Portal
+    participant A as REST API
+
+    Note over C: Read complete file
+    C->>C: Calculate CRC32<br/>checksum
+    C->>K: START message<br/>(crc32=1234567890)
+    C->>K: CHUNK messages<br/>(sequence 0-3)
+
+    K->>P: Consume messages
+    P->>P: Accumulate chunks
+    P->>P: Reassemble data
+    P->>P: Calculate CRC32<br/>of reassembled data
+
+    alt CRC32 matches
+        Note over P: ✓ Data integrity verified
+        P->>A: HTTP POST<br/>(send complete data)
+    else CRC32 mismatch
+        Note over P: ✗ Data corruption detected
+        P->>K: ERROR message<br/>"CRC32 checksum mismatch"
+    end
+```
+
+### Client Responsibilities
+
+1. **Calculate checksum before chunking**:
+   ```python
+   crc = 0
+   with open(file_path, 'rb') as f:
+       while chunk := f.read(65536):
+           crc = zlib.crc32(chunk, crc)
+   file_crc32 = crc & 0xffffffff  # Unsigned 32-bit integer
+   ```
+
+2. **Include in START message**:
+   - Send `crc32` field with the START message
+   - The checksum represents the complete file, not individual chunks
+
+3. **Handle CRC32 errors**:
+   - If portal detects mismatch, an ERROR message is sent
+   - Client should retry the upload
+
+### Portal Responsibilities
+
+1. **Store expected checksum**:
+   - Extract `crc32` from START message
+   - Store with job state
+
+2. **Verify after reassembly**:
+   - Accumulate all chunks
+   - Reassemble in correct order
+   - Calculate CRC32 of reassembled data
+   - Compare with expected checksum
+
+3. **Handle mismatches**:
+   ```python
+   if actual_crc32 != expected_crc32:
+       raise ValueError(
+           f"CRC32 checksum mismatch: expected {expected_crc32}, "
+           f"got {actual_crc32}"
+       )
+   ```
+
+### Key Characteristics
+
+| Aspect | Details |
+|--------|---------|
+| **Algorithm** | CRC32 (32-bit cyclic redundancy check) |
+| **Format** | Unsigned 32-bit integer (0 to 4,294,967,295) |
+| **Scope** | Complete file data (before chunking) |
+| **Timing** | Calculated before chunking, verified after reassembly |
+| **Optional** | CRC32 verification only happens if `crc32` field is provided |
+| **Performance** | Minimal overhead (~100ms for 50MB file) |
+
+### Benefits
+
+- **Data corruption detection**: Catch bit flips, truncation, or reassembly errors
+- **Debugging aid**: Identify if corruption happened during chunking or transmission
+- **Peace of mind**: Cryptographic-grade verification that data arrived intact
+- **Optional**: Backwards compatible - works without CRC32 for simple requests
+
+### Error Messages
+
+When CRC32 validation fails, the portal sends an ERROR message:
+
+```json
+{
+  "job_id": "abc-123",
+  "message_type": "ERROR",
+  "error_message": "CRC32 checksum mismatch for job abc-123: expected 1234567890, got 9876543210"
+}
+```
+
+The client can then:
+1. Log the error
+2. Retry the upload
+3. Investigate potential data corruption issues
+
+### Testing
+
+See `tests/test_crc32.py` for comprehensive test coverage:
+- Valid CRC32 passes verification
+- Invalid CRC32 triggers error
+- Multi-chunk transfers verified correctly
+- Jobs without CRC32 still work (backwards compatible)
 
 ## Multi-Instance Scaling with Partition Key Routing
 
@@ -371,6 +491,7 @@ All request messages sent to the `api-requests` topic follow this schema:
   // File Details (START message only)
   "filename": "document.pdf",
   "content_type": "application/pdf",
+  "crc32": 1234567890,
 
   // Data (START and CHUNK messages)
   "data": "base64-encoded-binary-data",
@@ -425,6 +546,7 @@ Initiates a new job and provides all metadata needed for the HTTP request.
 - `headers` - HTTP headers (auth, content-type, etc.)
 - `filename` - Original filename for multipart uploads
 - `content_type` - MIME type of the file
+- `crc32` - CRC32 checksum of complete data for integrity verification (unsigned 32-bit integer)
 - `data` - Base64 encoded data (if `total_chunks` = 1)
 
 **Example - Small File Upload:**
@@ -439,6 +561,7 @@ Initiates a new job and provides all metadata needed for the HTTP request.
   "headers": {},
   "filename": "test.txt",
   "content_type": "text/plain",
+  "crc32": 2870671212,
   "data": "VGhpcyBpcyBhIHRlc3QgZmlsZSBmb3IgZGVtb25zdHJhdGlvbiBwdXJwb3Nlcy4K"
 }
 ```
@@ -454,7 +577,8 @@ Initiates a new job and provides all metadata needed for the HTTP request.
   "endpoint": "/api/upload",
   "headers": {},
   "filename": "large-file.bin",
-  "content_type": "application/octet-stream"
+  "content_type": "application/octet-stream",
+  "crc32": 3456789012
 }
 ```
 
@@ -590,12 +714,16 @@ stateDiagram-v2
 
 1. Decode all base64 chunks
 2. Reassemble into complete binary data
-3. Build HTTP request:
+3. **Verify CRC32 checksum** (if provided in START message):
+   - Calculate CRC32 of reassembled data
+   - Compare with expected CRC32 from START message
+   - If mismatch: reject request with error
+4. Build HTTP request:
    - If `filename` present: multipart/form-data upload
    - Otherwise: raw body data
-4. Add OAuth2 token (if configured)
-5. Send HTTP request to target API
-6. Wait for response (with timeout)
+5. Add OAuth2 token (if configured)
+6. Send HTTP request to target API
+7. Wait for response (with timeout)
 
 ### Response Handling
 
@@ -636,6 +764,7 @@ stateDiagram-v2
 | `JobNotFound` | CHUNK received before START | Client should retry |
 | `MissingChunks` | Not all chunks received | Timeout, send ERROR response |
 | `InvalidData` | Base64 decode fails | Send ERROR response |
+| `CRC32Mismatch` | Data corruption during transfer | Client should retry |
 | `HTTPError` | Target API returns error | Return error status to client |
 | `Timeout` | Request takes too long | Send ERROR response |
 | `MaxJobsExceeded` | Too many concurrent jobs | Client should retry later |

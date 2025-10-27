@@ -3,6 +3,7 @@
 import json
 import os
 import uuid
+import zlib
 from typing import Dict, Optional
 from kafka import KafkaProducer
 import structlog
@@ -81,13 +82,17 @@ class KafkaSender:
         # Calculate total chunks
         total_chunks = calculate_chunk_count(file_path)
 
+        # Calculate CRC32 checksum of complete file
+        file_crc32 = self._calculate_file_crc32(file_path)
+
         logger.info(
             "Starting file upload",
             job_id=job_id,
             file_path=file_path,
             file_size=file_size,
             total_chunks=total_chunks,
-            endpoint=endpoint
+            endpoint=endpoint,
+            crc32=file_crc32
         )
 
         # Send START message
@@ -100,7 +105,8 @@ class KafkaSender:
             endpoint=endpoint,
             headers=headers or {},
             filename=filename,
-            content_type=content_type
+            content_type=content_type,
+            crc32=file_crc32
         )
 
         self._send_message(start_message)
@@ -227,6 +233,24 @@ class KafkaSender:
         }
 
         return content_types.get(ext, 'application/octet-stream')
+
+    def _calculate_file_crc32(self, file_path: str) -> int:
+        """
+        Calculate CRC32 checksum of a file.
+
+        Args:
+            file_path: Path to the file
+
+        Returns:
+            CRC32 checksum as unsigned 32-bit integer
+        """
+        crc = 0
+        with open(file_path, 'rb') as f:
+            while chunk := f.read(65536):  # Read in 64KB chunks
+                crc = zlib.crc32(chunk, crc)
+
+        # Ensure unsigned 32-bit integer
+        return crc & 0xffffffff
 
     def close(self) -> None:
         """Close the Kafka producer."""
