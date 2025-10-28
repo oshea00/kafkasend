@@ -487,7 +487,6 @@ All request messages sent to the `api-requests` topic follow this schema:
   "method": "POST|GET|PUT|PATCH|DELETE",
   "endpoint": "/api/upload",
   "headers": {
-    "Authorization": "Bearer token",
     "X-Custom-Header": "value"
   },
 
@@ -546,7 +545,7 @@ Initiates a new job and provides all metadata needed for the HTTP request.
 - `endpoint` - Target API path
 
 **Optional Fields:**
-- `headers` - HTTP headers (auth, content-type, etc.)
+- `headers` - HTTP headers (content-type, etc.)
 - `filename` - Original filename for multipart uploads
 - `content_type` - MIME type of the file
 - `crc32` - CRC32 checksum of complete data for integrity verification (unsigned 32-bit integer)
@@ -594,9 +593,7 @@ Initiates a new job and provides all metadata needed for the HTTP request.
   "total_chunks": 0,
   "method": "GET",
   "endpoint": "/api/status",
-  "headers": {
-    "Authorization": "Bearer eyJhbGc..."
-  }
+  "headers": {}
 }
 ```
 
