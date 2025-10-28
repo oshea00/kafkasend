@@ -360,6 +360,7 @@ sequenceDiagram
     participant KR as Kafka<br/>(api-requests)
     participant P as Portal Service
     participant A as REST API
+    participant KS as Kafka<br/>(api-responses)
 
     C->>C: Calculate chunks<br/>(file_size / 650KB)
     C->>KR: START message<br/>(total_chunks=4)
@@ -382,7 +383,7 @@ sequenceDiagram
     P->>A: HTTP POST<br/>(multipart, 2MB file)
     A-->>P: HTTP 200 Response
     P->>P: Check response size
-    P->>Kafka: Response message<br/>(single or chunked)
+    P->>KS: Response message<br/>(single or chunked)
 ```
 
 ### Simple Request (No Body)
@@ -393,13 +394,14 @@ sequenceDiagram
     participant KR as Kafka<br/>(api-requests)
     participant P as Portal Service
     participant A as REST API
+    participant KS as Kafka<br/>(api-responses)
 
     C->>KR: START message<br/>(method=GET, total_chunks=0)
     KR->>P: Consume message
     P->>P: Job started<br/>No data expected
     P->>A: HTTP GET request
     A-->>P: HTTP 200 JSON Response
-    P->>Kafka: Response message<br/>(is_json=true)
+    P->>KS: Response message<br/>(is_json=true)
 ```
 
 ### Large Response Handling (Chunked by Portal)
@@ -457,13 +459,14 @@ sequenceDiagram
     participant KR as Kafka<br/>(api-requests)
     participant P as Portal Service
     participant A as REST API
+    participant KS as Kafka<br/>(api-responses)
 
     C->>KR: START message
     C->>KR: CHUNK message (seq=0)
     KR->>P: Consume messages
     P->>P: Job started
     P->>P: Error: Invalid data
-    P->>Kafka: ERROR message<br/>(error_message)
+    P->>KS: ERROR message<br/>(error_message)
     P->>P: Job cancelled
 ```
 
