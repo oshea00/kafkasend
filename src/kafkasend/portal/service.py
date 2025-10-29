@@ -256,6 +256,9 @@ class PortalService:
         """
         Send HTTP response back to Kafka response topic.
 
+        For multi-chunk responses, sends a START message with metadata followed by CHUNK messages with data.
+        For single-chunk responses, sends a START message with both metadata and data.
+
         Args:
             job_id: Job identifier
             response: HTTP response object
@@ -281,39 +284,51 @@ class PortalService:
         needs_chunking = response_size > MAX_CHUNK_SIZE
 
         if needs_chunking:
-            # Send response in chunks
-            total_chunks = (response_size + MAX_CHUNK_SIZE - 1) // MAX_CHUNK_SIZE
+            # Calculate number of data chunks needed
+            data_chunks = (response_size + MAX_CHUNK_SIZE - 1) // MAX_CHUNK_SIZE
 
-            for i in range(total_chunks):
+            # Send START message with metadata (no data)
+            start_message = KafkaResponseMessage(
+                job_id=job_id,
+                message_type=MessageType.START,
+                sequence=0,
+                total_chunks=data_chunks,  # Total data-bearing chunks
+                status_code=response.status_code,
+                headers=dict(response.headers),
+                is_json=is_json,
+                crc32=response_crc32
+            )
+            self._send_kafka_message(start_message)
+
+            # Send CHUNK messages with data only
+            for i in range(data_chunks):
                 start = i * MAX_CHUNK_SIZE
                 end = min(start + MAX_CHUNK_SIZE, response_size)
                 chunk_data = response_text[start:end]
 
-                message = KafkaResponseMessage(
+                chunk_message = KafkaResponseMessage(
                     job_id=job_id,
                     message_type=MessageType.CHUNK,
-                    sequence=i,
-                    total_chunks=total_chunks,
-                    status_code=response.status_code if i == 0 else None,
-                    headers=dict(response.headers) if i == 0 else None,
-                    data=chunk_data,
-                    is_json=is_json,
-                    crc32=response_crc32 if i == 0 else None
+                    sequence=i,  # Sequence matches chunk number (0-based)
+                    total_chunks=data_chunks,
+                    data=chunk_data
                 )
 
-                self._send_kafka_message(message)
+                self._send_kafka_message(chunk_message)
 
             logger.info(
-                "Response sent in chunks",
+                "Response sent",
                 job_id=job_id,
-                total_chunks=total_chunks,
+                status_code=response.status_code,
+                total_chunks=data_chunks,
                 crc32=response_crc32
             )
         else:
-            # Send single response message
+            # Send single START message with metadata and data
             message = KafkaResponseMessage(
                 job_id=job_id,
                 message_type=MessageType.START,
+                sequence=0,
                 status_code=response.status_code,
                 headers=dict(response.headers),
                 data=response_text,

@@ -65,10 +65,11 @@ The KafkaSend protocol implements **bidirectional chunking** to handle large dat
 - Check response size (> 650KB requires chunking)
 - Base64 encode binary responses
 - Split large responses into 650KB chunks
-- Send CHUNK messages with sequence numbers
-- Include status code and headers in first message
+- Send START message with metadata (status code, headers, CRC32, total_chunks)
+- Send CHUNK messages with data only (no metadata)
 
 **Client responsibilities:**
+- Receive START message to get metadata
 - Receive and accumulate response chunks
 - Track sequence numbers to ensure all chunks received
 - Reassemble chunks in correct order
@@ -84,7 +85,7 @@ The KafkaSend protocol implements **bidirectional chunking** to handle large dat
 | **Chunk size** | 650KB (before base64) | 650KB (before base64) |
 | **When needed?** | Files > 650KB | Responses > 650KB |
 | **Encoding** | Base64 | Base64 |
-| **Message types** | START + CHUNKs | START/CHUNKs |
+| **Message types** | START + CHUNKs | START + CHUNKs |
 
 ```mermaid
 graph TD
@@ -271,10 +272,10 @@ sequenceDiagram
     P->>P: Encode/chunk response
 
     alt Single chunk response
-        P->>K: Response message<br/>(crc32=9876543210)
+        P->>K: START message<br/>(metadata + data + crc32)
     else Multi-chunk response
-        P->>K: CHUNK 0<br/>(crc32=9876543210)
-        P->>K: CHUNK 1-N
+        P->>K: START message<br/>(metadata only + crc32)
+        P->>K: CHUNK 0-N<br/>(data only)
     end
 
     K->>C: Consume response
@@ -304,7 +305,7 @@ response_crc32 = zlib.crc32(response_data) & 0xffffffff
 
 **2. Include CRC32 in response message:**
 ```python
-# In service.py:314-323 (single chunk)
+# In service.py (single chunk)
 message = KafkaResponseMessage(
     job_id=job_id,
     message_type=MessageType.START,
@@ -318,8 +319,8 @@ message = KafkaResponseMessage(
 ```
 
 **3. For multi-chunk responses:**
-- CRC32 included in **first CHUNK message only**
-- Subsequent chunks don't repeat CRC32
+- CRC32 included in **START message only** (along with other metadata)
+- CHUNK messages contain only data (no metadata)
 - Checksum represents complete response before chunking
 
 **4. Log CRC32 for audit trail:**
@@ -677,11 +678,12 @@ sequenceDiagram
 
     P->>P: Calculate chunks<br/>(5MB / 650KB = 8)
     P->>P: Encode as base64
-    P->>KS: CHUNK message<br/>(seq=0, total=8)
-    P->>KS: CHUNK message<br/>(seq=1, total=8)
-    P->>KS: CHUNK message<br/>(seq=2, total=8)
+    P->>KS: START message<br/>(metadata only, total=8)
+    P->>KS: CHUNK message<br/>(seq=0, data)
+    P->>KS: CHUNK message<br/>(seq=1, data)
+    P->>KS: CHUNK message<br/>(seq=2, data)
     P->>KS: ...
-    P->>KS: CHUNK message<br/>(seq=7, total=8)
+    P->>KS: CHUNK message<br/>(seq=7, data)
 
     Note over C: Accumulating response chunks...
     KS->>C: Consume messages
@@ -702,6 +704,7 @@ sequenceDiagram
 - **Client responsibility**: Reassemble response chunks in correct order
 - **Same chunking logic**: Both request and response use 650KB chunks
 - **Base64 encoding**: Applied to binary responses before chunking
+- **Symmetric protocol**: Both directions use START message for metadata, CHUNK messages for data
 
 ### Error Handling
 
@@ -987,13 +990,13 @@ stateDiagram-v2
 2. Check content type (JSON vs binary)
 3. For binary responses: encode as base64
 4. **Calculate response size:**
-   - If ≤ 650KB: send single response message
+   - If ≤ 650KB: send single START message with data
    - If > 650KB: **chunk the response**
 5. For chunked responses:
    - Split response into 650KB chunks
-   - Send first CHUNK with status_code and headers
-   - Send subsequent CHUNKs with sequence numbers
-   - Include total_chunks in all messages
+   - Send START message with metadata (status code, headers, CRC32, total_chunks)
+   - Send CHUNK messages with data only (sequence numbers 0-N)
+   - No metadata in CHUNK messages (cleaner separation of concerns)
 6. Flush all messages to `api-responses` topic
 7. Complete job and cleanup
 

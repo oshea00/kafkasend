@@ -425,46 +425,53 @@ def test_response_multi_chunk_crc32():
     # Create response state
     state = ResponseState("test-multi-chunk-response")
 
-    # First message with CRC32
+    # START message with metadata only (no data)
+    start_msg = KafkaResponseMessage(
+        job_id="test-multi-chunk-response",
+        message_type=MessageType.START,
+        sequence=0,
+        total_chunks=3,  # 3 data chunks
+        status_code=200,
+        headers={"Content-Type": "application/json"},
+        is_json=True,
+        crc32=expected_crc32
+    )
+
+    # Update state from START message
+    state.status_code = start_msg.status_code
+    state.headers = start_msg.headers
+    state.total_chunks = start_msg.total_chunks
+    state.expected_crc32 = start_msg.crc32
+    state.is_json = start_msg.is_json
+    # No data to add from START message
+
+    # First data CHUNK
     response_msg1 = KafkaResponseMessage(
         job_id="test-multi-chunk-response",
         message_type=MessageType.CHUNK,
         sequence=0,
         total_chunks=3,
-        status_code=200,
-        headers={"Content-Type": "application/json"},
-        data=chunk1,
-        is_json=True,
-        crc32=expected_crc32
+        data=chunk1
     )
-
-    # Update state from first message
-    state.status_code = response_msg1.status_code
-    state.headers = response_msg1.headers
-    state.total_chunks = response_msg1.total_chunks
-    state.expected_crc32 = response_msg1.crc32
-    state.is_json = response_msg1.is_json
     state.add_chunk(response_msg1.sequence, response_msg1.data)
 
-    # Second chunk
+    # Second data CHUNK
     response_msg2 = KafkaResponseMessage(
         job_id="test-multi-chunk-response",
         message_type=MessageType.CHUNK,
         sequence=1,
         total_chunks=3,
-        data=chunk2,
-        is_json=True
+        data=chunk2
     )
     state.add_chunk(response_msg2.sequence, response_msg2.data)
 
-    # Third chunk
+    # Third data CHUNK
     response_msg3 = KafkaResponseMessage(
         job_id="test-multi-chunk-response",
         message_type=MessageType.CHUNK,
         sequence=2,
         total_chunks=3,
-        data=chunk3,
-        is_json=True
+        data=chunk3
     )
     state.add_chunk(response_msg3.sequence, response_msg3.data)
 

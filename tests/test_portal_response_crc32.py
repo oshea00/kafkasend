@@ -126,23 +126,26 @@ def test_portal_large_response_crc32():
     job_id = "test-large-job"
     service._send_response(job_id, mock_response)
 
-    # Verify multiple chunks were sent
+    # Verify multiple messages were sent (START + CHUNKs)
     assert len(sent_messages) > 1, "Large response should be chunked"
 
-    # Verify first chunk has CRC32
-    first_chunk = sent_messages[0]
-    assert first_chunk['job_id'] == job_id
-    assert first_chunk['message_type'] == MessageType.CHUNK.value
-    assert first_chunk['sequence'] == 0
-    assert first_chunk['crc32'] == expected_crc32
-    assert first_chunk['status_code'] == 200
+    # Verify first message is START with metadata only (no data)
+    start_msg = sent_messages[0]
+    assert start_msg['job_id'] == job_id
+    assert start_msg['message_type'] == MessageType.START.value
+    assert start_msg['sequence'] == 0
+    assert start_msg['crc32'] == expected_crc32
+    assert start_msg['status_code'] == 200
+    assert start_msg['data'] is None  # START message has no data for multi-chunk
 
-    # Verify subsequent chunks don't have CRC32 (only in first chunk)
-    for i, chunk in enumerate(sent_messages[1:], start=1):
+    # Verify subsequent messages are CHUNKs with data only (no metadata)
+    for i, chunk in enumerate(sent_messages[1:], start=0):
         assert chunk['job_id'] == job_id
         assert chunk['message_type'] == MessageType.CHUNK.value
         assert chunk['sequence'] == i
-        assert chunk['crc32'] is None  # Only first chunk has CRC32
+        assert chunk['crc32'] is None  # Only START has CRC32
+        assert chunk['status_code'] is None  # Only START has status_code
+        assert chunk['data'] is not None  # CHUNKs have data
 
 
 def test_portal_pdf_response_crc32():
