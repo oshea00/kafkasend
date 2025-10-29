@@ -66,6 +66,7 @@ class KafkaResponseMessage(BaseModel):
     # Response data (base64 encoded for binary, or plain text for JSON)
     data: Optional[str] = Field(None, description="Response data")
     is_json: bool = Field(False, description="Whether data is JSON")
+    crc32: Optional[int] = Field(None, description="CRC32 checksum of complete response data for integrity verification")
 
     # Error details
     error_message: Optional[str] = Field(None, description="Error description")

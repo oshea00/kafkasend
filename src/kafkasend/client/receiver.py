@@ -1,6 +1,7 @@
 """Client for receiving responses from Kafka."""
 
 import json
+import zlib
 from typing import Dict, List, Optional, Callable
 from kafka import KafkaConsumer
 import structlog
@@ -22,6 +23,7 @@ class ResponseState:
         self.status_code: Optional[int] = None
         self.headers: Optional[Dict[str, str]] = None
         self.is_json: bool = False
+        self.expected_crc32: Optional[int] = None
         self.error_message: Optional[str] = None
 
     def add_chunk(self, sequence: int, data: str) -> None:
@@ -35,13 +37,54 @@ class ResponseState:
         return len(self.chunks) >= self.total_chunks
 
     def get_complete_data(self) -> str:
-        """Get the reassembled response data."""
+        """
+        Get the reassembled response data and verify CRC32 checksum.
+
+        Returns:
+            Complete response data
+
+        Raises:
+            ValueError: If response is incomplete or CRC32 verification fails
+        """
         if not self.is_complete():
             raise ValueError(f"Response for job {self.job_id} is not complete")
 
         # Sort chunks by sequence and concatenate
         sorted_data = [self.chunks[i] for i in sorted(self.chunks.keys())]
-        return ''.join(sorted_data)
+        complete_data = ''.join(sorted_data)
+
+        # Verify CRC32 checksum if provided
+        if self.expected_crc32 is not None:
+            # Calculate CRC32 of the raw bytes
+            if self.is_json:
+                # For JSON, calculate CRC32 of UTF-8 encoded text
+                raw_bytes = complete_data.encode('utf-8')
+            else:
+                # For binary data, decode base64 first
+                import base64
+                raw_bytes = base64.b64decode(complete_data)
+
+            actual_crc32 = zlib.crc32(raw_bytes) & 0xffffffff
+
+            if actual_crc32 != self.expected_crc32:
+                logger.error(
+                    "CRC32 verification failed",
+                    job_id=self.job_id,
+                    expected_crc32=self.expected_crc32,
+                    actual_crc32=actual_crc32
+                )
+                raise ValueError(
+                    f"CRC32 checksum mismatch for response {self.job_id}: "
+                    f"expected {self.expected_crc32}, got {actual_crc32}"
+                )
+
+            logger.info(
+                "CRC32 verification passed",
+                job_id=self.job_id,
+                crc32=actual_crc32
+            )
+
+        return complete_data
 
 
 class KafkaReceiver:
@@ -159,6 +202,8 @@ class KafkaReceiver:
             state.headers = response.headers
         if response.total_chunks is not None:
             state.total_chunks = response.total_chunks
+        if response.crc32 is not None:
+            state.expected_crc32 = response.crc32
 
         state.is_json = response.is_json
 

@@ -118,11 +118,26 @@ graph TD
 
 ## Data Integrity with CRC32 Checksums
 
-KafkaSend implements **CRC32 checksum validation** to ensure data integrity during chunked file transfers. This protects against data corruption that may occur during:
+KafkaSend implements **bidirectional CRC32 checksum validation** to ensure end-to-end data integrity during chunked transfers. This protects against data corruption that may occur during:
 - Message serialization/deserialization
-- Network transmission
+- Network transmission through Kafka
 - Chunk reassembly
 - Base64 encoding/decoding
+
+### Bidirectional Protection
+
+CRC32 validation works in **both directions** with clear responsibilities:
+
+| Direction | Who Calculates | Who Verifies | What Data | When |
+|-----------|----------------|--------------|-----------|------|
+| **Request** | Client | Portal | File/upload data | Before sending → After reassembly |
+| **Response** | Portal | Client | REST API response | After receiving → Before processing |
+
+This ensures **complete data integrity** from client through Kafka to portal to REST API and back.
+
+---
+
+## Request Direction: Client → Portal
 
 ### How It Works
 
@@ -152,68 +167,289 @@ sequenceDiagram
     end
 ```
 
-### Client Responsibilities
+### Client Responsibilities (Request Direction)
 
-1. **Calculate checksum before chunking**:
-   ```python
-   crc = 0
-   with open(file_path, 'rb') as f:
-       while chunk := f.read(65536):
-           crc = zlib.crc32(chunk, crc)
-   file_crc32 = crc & 0xffffffff  # Unsigned 32-bit integer
-   ```
+The client is responsible for calculating CRC32 **before** sending data:
 
-2. **Include in START message**:
-   - Send `crc32` field with the START message
-   - The checksum represents the complete file, not individual chunks
+**1. Calculate checksum of complete file:**
+```python
+# In sender.py:86
+crc = 0
+with open(file_path, 'rb') as f:
+    while chunk := f.read(65536):  # Read in 64KB chunks
+        crc = zlib.crc32(chunk, crc)
+file_crc32 = crc & 0xffffffff  # Unsigned 32-bit integer
+```
 
-3. **Handle CRC32 errors**:
-   - If portal detects mismatch, an ERROR message is sent
-   - Client should retry the upload
+**2. Include CRC32 in START message:**
+```python
+start_message = KafkaRequestMessage(
+    job_id=job_id,
+    message_type=MessageType.START,
+    method=HttpMethod.POST,
+    endpoint="/api/upload",
+    filename="document.pdf",
+    content_type="application/pdf",
+    crc32=file_crc32,  # ← CRC32 of complete file
+    total_chunks=4
+)
+```
 
-### Portal Responsibilities
+**3. Handle CRC32 validation errors:**
+- If portal detects mismatch, receives ERROR message
+- Client should log error and may retry upload
+- Indicates data corruption during transmission
 
-1. **Store expected checksum**:
-   - Extract `crc32` from START message
-   - Store with job state
+### Portal Responsibilities (Request Direction)
 
-2. **Verify after reassembly**:
-   - Accumulate all chunks
-   - Reassemble in correct order
-   - Calculate CRC32 of reassembled data
-   - Compare with expected checksum
+The portal is responsible for verifying CRC32 **after** reassembling data:
 
-3. **Handle mismatches**:
-   ```python
-   if actual_crc32 != expected_crc32:
-       raise ValueError(
-           f"CRC32 checksum mismatch: expected {expected_crc32}, "
-           f"got {actual_crc32}"
-       )
-   ```
+**1. Store expected CRC32 from START message:**
+```python
+# In job_manager.py:154
+job = JobState(
+    job_id=message.job_id,
+    method=message.method,
+    endpoint=message.endpoint,
+    expected_crc32=message.crc32,  # ← Store expected CRC32
+    total_chunks=message.total_chunks
+)
+```
 
-### Key Characteristics
+**2. Accumulate and reassemble chunks:**
+```python
+# In job_manager.py:164-165
+chunk_data = decode_chunk(message.data)
+job.add_chunk(message.sequence, chunk_data)
+```
 
-| Aspect | Details |
-|--------|---------|
-| **Algorithm** | CRC32 (32-bit cyclic redundancy check) |
-| **Format** | Unsigned 32-bit integer (0 to 4,294,967,295) |
-| **Scope** | Complete file data (before chunking) |
-| **Timing** | Calculated before chunking, verified after reassembly |
-| **Optional** | CRC32 verification only happens if `crc32` field is provided |
-| **Performance** | Minimal overhead (~100ms for 50MB file) |
+**3. Verify CRC32 after complete reassembly:**
+```python
+# In job_manager.py:85-105
+def get_complete_data(self) -> bytes:
+    # Reassemble all chunks
+    sorted_chunks = [self.chunks[i] for i in sorted(self.chunks.keys())]
+    complete_data = reassemble_chunks(sorted_chunks)
+
+    # Verify CRC32 if provided
+    if self.expected_crc32 is not None:
+        actual_crc32 = zlib.crc32(complete_data) & 0xffffffff
+        if actual_crc32 != self.expected_crc32:
+            raise ValueError(
+                f"CRC32 checksum mismatch for job {self.job_id}: "
+                f"expected {self.expected_crc32}, got {actual_crc32}"
+            )
+    return complete_data
+```
+
+**4. Send error response on mismatch:**
+- Portal automatically sends ERROR message to response topic
+- Job is cancelled and cleaned up
+- Client receives detailed error message
+
+---
+
+## Response Direction: Portal → Client
+
+### How It Works
+
+The portal calculates CRC32 checksums for **all** REST API responses and sends them back to the client for verification.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant K as Kafka
+    participant P as Portal
+    participant A as REST API
+
+    C->>K: Request message
+    K->>P: Process request
+    P->>A: HTTP POST/GET
+    A-->>P: HTTP Response<br/>(complete data)
+
+    Note over P: Calculate CRC32<br/>of response data
+    P->>P: Encode/chunk response
+
+    alt Single chunk response
+        P->>K: Response message<br/>(crc32=9876543210)
+    else Multi-chunk response
+        P->>K: CHUNK 0<br/>(crc32=9876543210)
+        P->>K: CHUNK 1-N
+    end
+
+    K->>C: Consume response
+    C->>C: Accumulate chunks
+    C->>C: Reassemble data
+    C->>C: Calculate CRC32<br/>of reassembled data
+
+    alt CRC32 matches
+        Note over C: ✓ Response integrity verified
+        C->>C: Process response
+    else CRC32 mismatch
+        Note over C: ✗ Data corruption detected
+        C->>C: Raise error
+    end
+```
+
+### Portal Responsibilities (Response Direction)
+
+The portal is responsible for calculating CRC32 **after** receiving REST API response:
+
+**1. Calculate CRC32 of complete HTTP response:**
+```python
+# In service.py:268
+response_data = response.content  # Raw bytes from REST API
+response_crc32 = zlib.crc32(response_data) & 0xffffffff
+```
+
+**2. Include CRC32 in response message:**
+```python
+# In service.py:314-323 (single chunk)
+message = KafkaResponseMessage(
+    job_id=job_id,
+    message_type=MessageType.START,
+    status_code=response.status_code,
+    headers=dict(response.headers),
+    data=response_text,
+    is_json=is_json,
+    crc32=response_crc32,  # ← CRC32 of complete response
+    total_chunks=1
+)
+```
+
+**3. For multi-chunk responses:**
+- CRC32 included in **first CHUNK message only**
+- Subsequent chunks don't repeat CRC32
+- Checksum represents complete response before chunking
+
+**4. Log CRC32 for audit trail:**
+```python
+logger.info(
+    "Response sent",
+    job_id=job_id,
+    status_code=response.status_code,
+    crc32=response_crc32  # ← Logged for debugging
+)
+```
+
+### Client Responsibilities (Response Direction)
+
+The client is responsible for verifying CRC32 **after** reassembling response:
+
+**1. Store expected CRC32 from first response message:**
+```python
+# In receiver.py:205-206
+if response.crc32 is not None:
+    state.expected_crc32 = response.crc32  # ← Store expected CRC32
+```
+
+**2. Accumulate response chunks:**
+```python
+# In receiver.py:212
+if response.data:
+    state.add_chunk(response.sequence, response.data)
+```
+
+**3. Verify CRC32 after complete reassembly:**
+```python
+# In receiver.py:57-79
+def get_complete_data(self) -> str:
+    # Reassemble chunks
+    sorted_data = [self.chunks[i] for i in sorted(self.chunks.keys())]
+    complete_data = ''.join(sorted_data)
+
+    # Verify CRC32 if provided
+    if self.expected_crc32 is not None:
+        # For JSON: calculate CRC32 of UTF-8 bytes
+        if self.is_json:
+            raw_bytes = complete_data.encode('utf-8')
+        # For binary: decode base64 first, then calculate
+        else:
+            import base64
+            raw_bytes = base64.b64decode(complete_data)
+
+        actual_crc32 = zlib.crc32(raw_bytes) & 0xffffffff
+
+        if actual_crc32 != self.expected_crc32:
+            raise ValueError(
+                f"CRC32 checksum mismatch for response {self.job_id}: "
+                f"expected {self.expected_crc32}, got {actual_crc32}"
+            )
+    return complete_data
+```
+
+**4. Handle CRC32 validation errors:**
+- Client raises `ValueError` on mismatch
+- Application should log error
+- May indicate data corruption during transmission
+
+---
+
+## Summary of Responsibilities
+
+### Complete Responsibility Matrix
+
+| Component | Request Direction (Upload) | Response Direction (Download) |
+|-----------|---------------------------|------------------------------|
+| **Client** | ✓ Calculate CRC32 of file<br>✓ Send in START message<br>✓ Handle ERROR responses | ✓ Store CRC32 from response<br>✓ Verify after reassembly<br>✓ Raise error on mismatch |
+| **Portal** | ✓ Store CRC32 from START<br>✓ Verify after reassembly<br>✓ Send ERROR on mismatch | ✓ Calculate CRC32 of REST response<br>✓ Send in response message<br>✓ Log for audit trail |
+
+### Key Differences Between Directions
+
+| Aspect | Request CRC32 (Client → Portal) | Response CRC32 (Portal → Client) |
+|--------|--------------------------------|----------------------------------|
+| **Calculated by** | Client (sender.py) | Portal (service.py) |
+| **Verified by** | Portal (job_manager.py) | Client (receiver.py) |
+| **Data type** | Always binary (files) | JSON or binary |
+| **CRC32 scope** | Original file bytes | HTTP response content bytes |
+| **In message** | START message | First response message |
+| **Error handling** | Portal sends ERROR message | Client raises ValueError |
+
+### CRC32 Calculation Details
+
+**Request (Client):**
+```python
+# File bytes → CRC32
+crc32 = zlib.crc32(file_bytes) & 0xffffffff
+```
+
+**Response - JSON (Portal):**
+```python
+# JSON text bytes → CRC32
+json_bytes = '{"status": "ok"}'.encode('utf-8')
+crc32 = zlib.crc32(json_bytes) & 0xffffffff
+```
+
+**Response - Binary (Portal):**
+```python
+# Binary bytes → CRC32 (before base64 encoding)
+crc32 = zlib.crc32(binary_bytes) & 0xffffffff
+```
+
+### Important Notes
+
+1. **CRC32 calculated on raw data**: Always calculated on the original bytes, not base64-encoded data
+2. **Checksum covers complete data**: Not individual chunks, but the complete file/response
+3. **Included in first message only**: START message for requests, first CHUNK/START for responses
+4. **Backwards compatible**: Optional field, works without CRC32
+5. **Performance**: Minimal overhead (~100ms for 50MB file)
+
+---
+
+## Benefits and Error Handling
 
 ### Benefits
 
-- **Data corruption detection**: Catch bit flips, truncation, or reassembly errors
-- **Debugging aid**: Identify if corruption happened during chunking or transmission
-- **Peace of mind**: Cryptographic-grade verification that data arrived intact
-- **Optional**: Backwards compatible - works without CRC32 for simple requests
+- **End-to-end data integrity**: Verifies data from client → portal → REST API → portal → client
+- **Corruption detection**: Catches bit flips, truncation, or reassembly errors
+- **Bidirectional protection**: Both uploads and downloads verified
+- **Debugging aid**: Identifies where corruption occurred (transmission vs processing)
+- **Audit trail**: All CRC32 values logged for investigation
+- **Optional**: Backwards compatible with clients that don't send CRC32
 
 ### Error Messages
 
-When CRC32 validation fails, the portal sends an ERROR message:
-
+**Request Direction (Portal detects corruption):**
 ```json
 {
   "job_id": "abc-123",
@@ -222,18 +458,34 @@ When CRC32 validation fails, the portal sends an ERROR message:
 }
 ```
 
-The client can then:
-1. Log the error
-2. Retry the upload
-3. Investigate potential data corruption issues
+**Response Direction (Client detects corruption):**
+```python
+ValueError: CRC32 checksum mismatch for response abc-123: expected 1234567890, got 9876543210
+```
+
+### Recovery Actions
+
+| Scenario | Action |
+|----------|--------|
+| Request CRC32 mismatch | Portal sends ERROR → Client logs error → Client may retry upload |
+| Response CRC32 mismatch | Client raises exception → Application logs error → Application may retry request |
+| Network corruption | CRC32 detects issue → Request/response rejected → Ensures data integrity |
 
 ### Testing
 
-See `tests/test_crc32.py` for comprehensive test coverage:
-- Valid CRC32 passes verification
-- Invalid CRC32 triggers error
-- Multi-chunk transfers verified correctly
-- Jobs without CRC32 still work (backwards compatible)
+See comprehensive test coverage in:
+- **`tests/test_crc32.py`**: Request and response CRC32 validation (12 tests)
+- **`tests/test_portal_response_crc32.py`**: Portal response calculation logic (6 tests)
+
+Test coverage includes:
+- ✅ Valid CRC32 passes verification (requests and responses)
+- ✅ Invalid CRC32 triggers error (requests and responses)
+- ✅ Multi-chunk transfers verified correctly (requests and responses)
+- ✅ JSON and binary responses handled correctly
+- ✅ Large file chunking with CRC32 validation
+- ✅ Empty responses and edge cases
+- ✅ Unicode handling in JSON responses
+- ✅ Jobs without CRC32 still work (backwards compatible)
 
 ## Multi-Instance Scaling with Partition Key Routing
 
@@ -524,6 +776,7 @@ All response messages sent to the `api-responses` topic follow this schema:
   // Response Data
   "data": "base64-or-plain-text",
   "is_json": true,
+  "crc32": 9876543210,
 
   // Error Details (ERROR message only)
   "error_message": "Error description"
@@ -661,7 +914,8 @@ The portal sends response messages back on the `api-responses` topic.
     "Content-Length": "361"
   },
   "data": "{\"message\":\"File uploaded successfully\",\"filename\":\"test.txt\",\"size\":48}",
-  "is_json": true
+  "is_json": true,
+  "crc32": 2847563921
 }
 ```
 

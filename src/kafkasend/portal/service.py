@@ -4,6 +4,7 @@ import json
 import signal
 import sys
 import time
+import zlib
 from typing import Optional
 from kafka import KafkaConsumer, KafkaProducer
 import structlog
@@ -263,6 +264,9 @@ class PortalService:
         is_json = False
         response_data = response.content
 
+        # Calculate CRC32 checksum of raw response data
+        response_crc32 = zlib.crc32(response_data) & 0xffffffff
+
         content_type = response.headers.get('Content-Type', '')
         if 'application/json' in content_type:
             is_json = True
@@ -293,7 +297,8 @@ class PortalService:
                     status_code=response.status_code if i == 0 else None,
                     headers=dict(response.headers) if i == 0 else None,
                     data=chunk_data,
-                    is_json=is_json
+                    is_json=is_json,
+                    crc32=response_crc32 if i == 0 else None
                 )
 
                 self._send_kafka_message(message)
@@ -301,7 +306,8 @@ class PortalService:
             logger.info(
                 "Response sent in chunks",
                 job_id=job_id,
-                total_chunks=total_chunks
+                total_chunks=total_chunks,
+                crc32=response_crc32
             )
         else:
             # Send single response message
@@ -312,12 +318,18 @@ class PortalService:
                 headers=dict(response.headers),
                 data=response_text,
                 is_json=is_json,
+                crc32=response_crc32,
                 total_chunks=1
             )
 
             self._send_kafka_message(message)
 
-            logger.info("Response sent", job_id=job_id, status_code=response.status_code)
+            logger.info(
+                "Response sent",
+                job_id=job_id,
+                status_code=response.status_code,
+                crc32=response_crc32
+            )
 
     def _send_error_response(self, job_id: str, error_message: str) -> None:
         """
