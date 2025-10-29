@@ -33,7 +33,7 @@ The protocol defines three message types:
 
 | Type | Purpose |
 |------|---------|
-| `START` | Initiates a new job with metadata and configuration |
+| `START` | Initiates a new job with metadata and configuration (never contains data) |
 | `CHUNK` | Carries a chunk of data (base64 encoded for binary, plain text for text-based content) |
 | `ERROR` | Reports errors during processing |
 
@@ -82,9 +82,9 @@ The KafkaSend protocol implements **bidirectional chunking** to handle large dat
 | **Who chunks?** | Client | Portal |
 | **Who reassembles?** | Portal | Client |
 | **Chunk size** | 650KB (before base64) | 650KB (before base64) |
-| **When needed?** | Files > 650KB | Responses > 650KB |
+| **Message count** | START + 1 CHUNK (small)<br>START + N CHUNKs (large) | START + 1 CHUNK (small)<br>START + N CHUNKs (large) |
 | **Encoding** | Base64 | Base64 |
-| **Message types** | START + CHUNKs | START + CHUNKs |
+| **Protocol** | START (metadata only) + CHUNK(s) with data | START (metadata only) + CHUNK(s) with data |
 
 ```mermaid
 graph TD
@@ -602,9 +602,11 @@ sequenceDiagram
 
     C->>C: Read file (< 650KB)
     C->>C: Encode as base64
-    C->>KR: START message<br/>(total_chunks=1, data)
-    KR->>P: Consume message
-    P->>P: Job started<br/>All chunks received
+    C->>KR: START message<br/>(total_chunks=1, metadata only)
+    C->>KR: CHUNK message<br/>(seq=0, data)
+    KR->>P: Consume messages
+    P->>P: Job started
+    P->>P: Chunk 0 received<br/>All chunks received
     P->>P: Decode base64
     P->>A: HTTP POST (multipart)
     A-->>P: HTTP 200 Response
@@ -740,7 +742,7 @@ sequenceDiagram
 
 Clients send two types of messages to the `api-requests` topic: **START** and **CHUNK**.
 
-**START Message - File Upload (POST/PUT with file):**
+**START Message - File Upload (POST/PUT with file) - Metadata Only:**
 ```json
 {
   "job_id": "uuid-v4",
@@ -757,6 +759,8 @@ Clients send two types of messages to the `api-requests` topic: **START** and **
   "crc32": 1234567890
 }
 ```
+
+**Note:** START messages never contain data. Data is always sent in separate CHUNK messages, even for small files with `total_chunks=1`.
 
 **START Message - Simple Request (GET/DELETE with no body):**
 ```json
@@ -845,9 +849,9 @@ Initiates a new job and provides all metadata needed for the HTTP request.
 - `filename` - Original filename for multipart uploads
 - `content_type` - MIME type of the file
 - `crc32` - CRC32 checksum of complete data for integrity verification (unsigned 32-bit integer)
-- `data` - Base64 encoded data (if `total_chunks` = 1)
+- `data` - Not used in START messages (always null/omitted; data sent in CHUNK messages)
 
-**Example - Small File Upload:**
+**Example - Small File Upload (START message - metadata only):**
 ```json
 {
   "job_id": "a7cf937b-b8ca-41e5-a9d1-e380bc726dea",
@@ -859,7 +863,17 @@ Initiates a new job and provides all metadata needed for the HTTP request.
   "headers": {},
   "filename": "test.txt",
   "content_type": "text/plain",
-  "crc32": 2870671212,
+  "crc32": 2870671212
+}
+```
+
+**Followed by CHUNK message with data:**
+```json
+{
+  "job_id": "a7cf937b-b8ca-41e5-a9d1-e380bc726dea",
+  "message_type": "CHUNK",
+  "sequence": 0,
+  "total_chunks": 1,
   "data": "VGhpcyBpcyBhIHRlc3QgZmlsZSBmb3IgZGVtb25zdHJhdGlvbiBwdXJwb3Nlcy4K"
 }
 ```
