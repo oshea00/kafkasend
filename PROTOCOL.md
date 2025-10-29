@@ -144,16 +144,17 @@ This ensures **complete data integrity** from client through Kafka to portal to 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant K as Kafka
+    participant KReq as Kafka<br/>api-requests
     participant P as Portal
     participant A as REST API
+    participant KResp as Kafka<br/>api-responses
 
     Note over C: Read complete file
     C->>C: Calculate CRC32<br/>checksum
-    C->>K: START message<br/>(crc32=1234567890)
-    C->>K: CHUNK messages<br/>(sequence 0-3)
+    C->>KReq: START message<br/>(crc32=1234567890)
+    C->>KReq: CHUNK messages<br/>(sequence 0-3)
 
-    K->>P: Consume messages
+    KReq->>P: Consume messages
     P->>P: Accumulate chunks
     P->>P: Reassemble data
     P->>P: Calculate CRC32<br/>of reassembled data
@@ -163,7 +164,7 @@ sequenceDiagram
         P->>A: HTTP POST<br/>(send complete data)
     else CRC32 mismatch
         Note over P: ✗ Data corruption detected
-        P->>K: ERROR message<br/>"CRC32 checksum mismatch"
+        P->>KResp: ERROR message<br/>"CRC32 checksum mismatch"
     end
 ```
 
@@ -258,26 +259,22 @@ The portal calculates CRC32 checksums for **all** REST API responses and sends t
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant K as Kafka
+    participant KReq as Kafka<br/>api-requests
     participant P as Portal
     participant A as REST API
+    participant KResp as Kafka<br/>api-responses
 
-    C->>K: Request message
-    K->>P: Process request
+    C->>KReq: Request message
+    KReq->>P: Consume request
     P->>A: HTTP POST/GET
     A-->>P: HTTP Response<br/>(complete data)
 
     Note over P: Calculate CRC32<br/>of response data
     P->>P: Encode/chunk response
+    P->>KResp: START message<br/>(metadata only + crc32)
+    P->>KResp: CHUNK message(s)<br/>(data only)
 
-    alt Single chunk response
-        P->>K: START message<br/>(metadata + data + crc32)
-    else Multi-chunk response
-        P->>K: START message<br/>(metadata only + crc32)
-        P->>K: CHUNK 0-N<br/>(data only)
-    end
-
-    K->>C: Consume response
+    KResp->>C: Consume response
     C->>C: Accumulate chunks
     C->>C: Reassemble data
     C->>C: Calculate CRC32<br/>of reassembled data
@@ -302,27 +299,40 @@ response_data = response.content  # Raw bytes from REST API
 response_crc32 = zlib.crc32(response_data) & 0xffffffff
 ```
 
-**2. Include CRC32 in response message:**
+**2. Include CRC32 in START message:**
 ```python
-# In service.py (single chunk)
-message = KafkaResponseMessage(
+# In service.py - START message (metadata only)
+start_message = KafkaResponseMessage(
     job_id=job_id,
     message_type=MessageType.START,
+    sequence=0,
+    total_chunks=data_chunks,
     status_code=response.status_code,
     headers=dict(response.headers),
-    data=response_text,
     is_text=is_text,
-    crc32=response_crc32,  # ← CRC32 of complete response
-    total_chunks=1
+    crc32=response_crc32  # ← CRC32 of complete response
 )
 ```
 
-**3. For multi-chunk responses:**
+**3. Send CHUNK message(s) with data:**
+```python
+# CHUNK message (data only, no metadata)
+chunk_message = KafkaResponseMessage(
+    job_id=job_id,
+    message_type=MessageType.CHUNK,
+    sequence=i,
+    total_chunks=data_chunks,
+    data=chunk_data  # ← Data only
+)
+```
+
+**4. Key points:**
 - CRC32 included in **START message only** (along with other metadata)
 - CHUNK messages contain only data (no metadata)
 - Checksum represents complete response before chunking
+- Pattern is consistent regardless of response size
 
-**4. Log CRC32 for audit trail:**
+**5. Log CRC32 for audit trail:**
 ```python
 logger.info(
     "Response sent",
@@ -728,32 +738,49 @@ sequenceDiagram
 
 ### Request Message Schema
 
-All request messages sent to the `api-requests` topic follow this schema:
+Clients send two types of messages to the `api-requests` topic: **START** and **CHUNK**.
 
+**START Message - File Upload (POST/PUT with file):**
 ```json
 {
   "job_id": "uuid-v4",
-  "message_type": "START|CHUNK|ERROR",
+  "message_type": "START",
   "sequence": 0,
   "total_chunks": 4,
-
-  // HTTP Request Details (START message only)
-  "method": "POST|GET|PUT|PATCH|DELETE",
+  "method": "POST",
   "endpoint": "/api/upload",
   "headers": {
     "X-Custom-Header": "value"
   },
-
-  // File Details (START message only)
   "filename": "document.pdf",
   "content_type": "application/pdf",
-  "crc32": 1234567890,
+  "crc32": 1234567890
+}
+```
 
-  // Data (START and CHUNK messages)
-  "data": "base64-encoded-binary-data",
+**START Message - Simple Request (GET/DELETE with no body):**
+```json
+{
+  "job_id": "uuid-v4",
+  "message_type": "START",
+  "sequence": 0,
+  "total_chunks": 0,
+  "method": "GET",
+  "endpoint": "/api/documents/123",
+  "headers": {
+    "X-Custom-Header": "value"
+  }
+}
+```
 
-  // Error Details (ERROR message only)
-  "error_message": "Error description"
+**CHUNK Message (data only, follows START):**
+```json
+{
+  "job_id": "uuid-v4",
+  "message_type": "CHUNK",
+  "sequence": 0,
+  "total_chunks": 4,
+  "data": "base64-encoded-binary-data"
 }
 ```
 
@@ -761,26 +788,40 @@ All request messages sent to the `api-requests` topic follow this schema:
 
 All response messages sent to the `api-responses` topic follow this schema:
 
+**START Message (metadata only):**
 ```json
 {
   "job_id": "uuid-v4",
-  "message_type": "START|CHUNK|ERROR",
+  "message_type": "START",
   "sequence": 0,
-  "total_chunks": 1,
-
-  // HTTP Response Details
+  "total_chunks": 1,  // Number of CHUNK messages to follow
   "status_code": 200,
   "headers": {
     "Content-Type": "application/json",
     "Content-Length": "1234"
   },
-
-  // Response Data
-  "data": "base64-or-plain-text",
   "is_text": true,
   "crc32": 9876543210,
+  "data": null  // Always null in START messages
+}
+```
 
-  // Error Details (ERROR message only)
+**CHUNK Message (data only):**
+```json
+{
+  "job_id": "uuid-v4",
+  "message_type": "CHUNK",
+  "sequence": 0,
+  "total_chunks": 1,
+  "data": "base64-or-plain-text"  // Actual response data
+}
+```
+
+**ERROR Message:**
+```json
+{
+  "job_id": "uuid-v4",
+  "message_type": "ERROR",
   "error_message": "Error description"
 }
 ```
@@ -887,7 +928,9 @@ Carries a chunk of binary data, base64 encoded.
 
 The portal sends response messages back on the `api-responses` topic.
 
-**Example - Success Response:**
+**Example - Success Response (2 messages):**
+
+START message (metadata):
 ```json
 {
   "job_id": "a7cf937b-b8ca-41e5-a9d1-e380bc726dea",
@@ -899,9 +942,20 @@ The portal sends response messages back on the `api-responses` topic.
     "Content-Type": "application/json",
     "Content-Length": "361"
   },
-  "data": "{\"message\":\"File uploaded successfully\",\"filename\":\"test.txt\",\"size\":48}",
   "is_text": true,
-  "crc32": 2847563921
+  "crc32": 2847563921,
+  "data": null
+}
+```
+
+CHUNK message (data):
+```json
+{
+  "job_id": "a7cf937b-b8ca-41e5-a9d1-e380bc726dea",
+  "message_type": "CHUNK",
+  "sequence": 0,
+  "total_chunks": 1,
+  "data": "{\"message\":\"File uploaded successfully\",\"filename\":\"test.txt\",\"size\":48}"
 }
 ```
 
@@ -1087,13 +1141,14 @@ request_timeout_ms: int = 120000        # 2 minutes
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant K as Kafka
+    participant KReq as Kafka<br/>api-requests
     participant P as Portal
     participant A as REST API
+    participant KResp as Kafka<br/>api-responses
 
     Note over P: Job created at T=0
-    C->>K: START message
-    K->>P: Consume (T=0)
+    C->>KReq: START message
+    KReq->>P: Consume (T=0)
     P->>A: HTTP POST (timeout=900s)
 
     Note over P: Heartbeats sent every 3s<br/>to keep session alive
@@ -1104,16 +1159,16 @@ sequenceDiagram
 
     alt Request completes within 15 minutes
         A-->>P: Response (T=600s)
-        P->>K: Response message
-        K->>C: Consume response
+        P->>KResp: Response message
+        KResp->>C: Consume response
     else Request exceeds 15 minutes
         A-->>P: Timeout (T=900s)
-        P->>K: ERROR message<br/>"Request timeout"
+        P->>KResp: ERROR message<br/>"Request timeout"
     end
 
     Note over P: Cleanup check at T=960s<br/>Job age = 960s > 900s
     P->>P: Remove stale job
-    P->>K: ERROR message<br/>"Job timeout: exceeded max age"
+    P->>KResp: ERROR message<br/>"Job timeout: exceeded max age"
 ```
 
 #### Configuration Guidelines

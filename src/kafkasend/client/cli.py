@@ -84,8 +84,8 @@ def send_file(ctx, file_path, endpoint, method, header, content_type, wait, outp
                 # Get response data
                 response_data = response.get_complete_data()
 
-                if response.is_json:
-                    click.echo(f"Response (JSON):\n{response_data}")
+                if response.is_text:
+                    click.echo(f"Response (text):\n{response_data}")
                     if output:
                         with open(output, 'w') as f:
                             f.write(response_data)
