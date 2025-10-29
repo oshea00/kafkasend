@@ -286,7 +286,7 @@ def test_response_state_crc32_verification_json():
         status_code=200,
         headers={"Content-Type": "application/json"},
         data=json_data,
-        is_json=True,
+        is_text=True,
         crc32=expected_crc32
     )
 
@@ -295,7 +295,7 @@ def test_response_state_crc32_verification_json():
     state.headers = response_msg.headers
     state.total_chunks = response_msg.total_chunks
     state.expected_crc32 = response_msg.crc32
-    state.is_json = response_msg.is_json
+    state.is_text = response_msg.is_text
     state.add_chunk(response_msg.sequence, response_msg.data)
 
     # Verify CRC32 passes
@@ -325,7 +325,7 @@ def test_response_state_crc32_verification_binary():
         status_code=200,
         headers={"Content-Type": "application/octet-stream"},
         data=encoded_data,
-        is_json=False,
+        is_text=False,
         crc32=expected_crc32
     )
 
@@ -334,7 +334,7 @@ def test_response_state_crc32_verification_binary():
     state.headers = response_msg.headers
     state.total_chunks = response_msg.total_chunks
     state.expected_crc32 = response_msg.crc32
-    state.is_json = response_msg.is_json
+    state.is_text = response_msg.is_text
     state.add_chunk(response_msg.sequence, response_msg.data)
 
     # Verify CRC32 passes
@@ -362,7 +362,7 @@ def test_response_state_crc32_verification_failure():
         status_code=200,
         headers={"Content-Type": "application/json"},
         data=json_data,
-        is_json=True,
+        is_text=True,
         crc32=wrong_crc32
     )
 
@@ -370,7 +370,7 @@ def test_response_state_crc32_verification_failure():
     state.status_code = response_msg.status_code
     state.total_chunks = response_msg.total_chunks
     state.expected_crc32 = response_msg.crc32
-    state.is_json = response_msg.is_json
+    state.is_text = response_msg.is_text
     state.add_chunk(response_msg.sequence, response_msg.data)
 
     # Verify CRC32 check fails
@@ -396,13 +396,13 @@ def test_response_state_no_crc32():
         total_chunks=1,
         status_code=200,
         data=json_data,
-        is_json=True,
+        is_text=True,
         crc32=None  # No CRC32
     )
 
     # Manually update state
     state.total_chunks = response_msg.total_chunks
-    state.is_json = response_msg.is_json
+    state.is_text = response_msg.is_text
     state.add_chunk(response_msg.sequence, response_msg.data)
 
     # Should work without CRC32 verification
@@ -433,7 +433,7 @@ def test_response_multi_chunk_crc32():
         total_chunks=3,  # 3 data chunks
         status_code=200,
         headers={"Content-Type": "application/json"},
-        is_json=True,
+        is_text=True,
         crc32=expected_crc32
     )
 
@@ -442,7 +442,7 @@ def test_response_multi_chunk_crc32():
     state.headers = start_msg.headers
     state.total_chunks = start_msg.total_chunks
     state.expected_crc32 = start_msg.crc32
-    state.is_json = start_msg.is_json
+    state.is_text = start_msg.is_text
     # No data to add from START message
 
     # First data CHUNK

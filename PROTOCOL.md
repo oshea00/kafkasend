@@ -29,13 +29,12 @@ graph LR
 
 ## Message Types
 
-The protocol defines four message types:
+The protocol defines three message types:
 
 | Type | Purpose |
 |------|---------|
 | `START` | Initiates a new job with metadata and configuration |
-| `CHUNK` | Carries a chunk of binary data (base64 encoded) |
-| `END` | Optional completion marker for requests with no data |
+| `CHUNK` | Carries a chunk of data (base64 encoded for binary, plain text for text-based content) |
 | `ERROR` | Reports errors during processing |
 
 ## Bidirectional Chunking
@@ -312,7 +311,7 @@ message = KafkaResponseMessage(
     status_code=response.status_code,
     headers=dict(response.headers),
     data=response_text,
-    is_json=is_json,
+    is_text=is_text,
     crc32=response_crc32,  # ← CRC32 of complete response
     total_chunks=1
 )
@@ -362,7 +361,7 @@ def get_complete_data(self) -> str:
     # Verify CRC32 if provided
     if self.expected_crc32 is not None:
         # For JSON: calculate CRC32 of UTF-8 bytes
-        if self.is_json:
+        if self.is_text:
             raw_bytes = complete_data.encode('utf-8')
         # For binary: decode base64 first, then calculate
         else:
@@ -654,7 +653,7 @@ sequenceDiagram
     P->>P: Job started<br/>No data expected
     P->>A: HTTP GET request
     A-->>P: HTTP 200 JSON Response
-    P->>KS: Response message<br/>(is_json=true)
+    P->>KS: Response message<br/>(is_text=true)
 ```
 
 ### Large Response Handling (Chunked by Portal)
@@ -734,7 +733,7 @@ All request messages sent to the `api-requests` topic follow this schema:
 ```json
 {
   "job_id": "uuid-v4",
-  "message_type": "START|CHUNK|END|ERROR",
+  "message_type": "START|CHUNK|ERROR",
   "sequence": 0,
   "total_chunks": 4,
 
@@ -778,7 +777,7 @@ All response messages sent to the `api-responses` topic follow this schema:
 
   // Response Data
   "data": "base64-or-plain-text",
-  "is_json": true,
+  "is_text": true,
   "crc32": 9876543210,
 
   // Error Details (ERROR message only)
@@ -884,22 +883,6 @@ Carries a chunk of binary data, base64 encoded.
 - Plus JSON overhead: ~870 KB total message size
 - Well under Kafka's 1 MB default limit
 
-### END Message (Request)
-
-Optional marker to signal completion of a request that has no data chunks.
-
-**Required Fields:**
-- `job_id` - Matches the START message
-- `message_type` = `"END"`
-
-**Example:**
-```json
-{
-  "job_id": "def456...",
-  "message_type": "END"
-}
-```
-
 ### Response Messages
 
 The portal sends response messages back on the `api-responses` topic.
@@ -917,7 +900,7 @@ The portal sends response messages back on the `api-responses` topic.
     "Content-Length": "361"
   },
   "data": "{\"message\":\"File uploaded successfully\",\"filename\":\"test.txt\",\"size\":48}",
-  "is_json": true,
+  "is_text": true,
   "crc32": 2847563921
 }
 ```
@@ -987,18 +970,21 @@ stateDiagram-v2
 **Portal responsibilities (chunking large responses):**
 
 1. Receive HTTP response from REST API
-2. Check content type (JSON vs binary)
-3. For binary responses: encode as base64
-4. **Calculate response size:**
-   - If ≤ 650KB: send single START message with data
-   - If > 650KB: **chunk the response**
-5. For chunked responses:
-   - Split response into 650KB chunks
-   - Send START message with metadata (status code, headers, CRC32, total_chunks)
-   - Send CHUNK messages with data only (sequence numbers 0-N)
-   - No metadata in CHUNK messages (cleaner separation of concerns)
-6. Flush all messages to `api-responses` topic
-7. Complete job and cleanup
+2. **Determine content encoding:**
+   - Text-based content types (sent as plain UTF-8 text):
+     - `application/json`
+     - `text/plain`
+     - `text/html`
+     - `text/xml` / `application/xml`
+     - `text/css`, `text/javascript`, `application/javascript`
+   - Binary content types (base64 encoded):
+     - `application/pdf`, `application/octet-stream`, `image/*`, etc.
+3. **Calculate response size and send messages:**
+   - Always send START message (metadata only: status code, headers, CRC32, total_chunks, is_text)
+   - Always send CHUNK message(s) with data
+   - Split into 650KB chunks if response > 650KB
+4. Flush all messages to `api-responses` topic
+5. Complete job and cleanup
 
 **Client responsibilities (reassembling responses):**
 
@@ -1009,7 +995,7 @@ stateDiagram-v2
    - Sort chunks by sequence number
    - Concatenate chunk data
    - Decode base64 (if binary)
-   - Parse JSON (if is_json=true)
+   - Parse JSON (if is_text=true)
 5. Display or save complete response
 6. Close consumer connection
 

@@ -18,9 +18,8 @@ class HttpMethod(str, Enum):
 class MessageType(str, Enum):
     """Types of messages in the protocol."""
 
-    START = "START"  # First message of a request
+    START = "START"  # First message of a request with metadata
     CHUNK = "CHUNK"  # Data chunk
-    END = "END"      # Last message/completion marker
     ERROR = "ERROR"  # Error notification
 
 
@@ -63,9 +62,9 @@ class KafkaResponseMessage(BaseModel):
     status_code: Optional[int] = Field(None, description="HTTP status code")
     headers: Optional[Dict[str, str]] = Field(None, description="Response headers")
 
-    # Response data (base64 encoded for binary, or plain text for JSON)
+    # Response data (base64 encoded for binary, or plain text for text-based content)
     data: Optional[str] = Field(None, description="Response data")
-    is_json: bool = Field(False, description="Whether data is JSON")
+    is_text: bool = Field(False, description="Whether data is text-based (JSON, plain text, HTML) vs binary")
     crc32: Optional[int] = Field(None, description="CRC32 checksum of complete response data for integrity verification")
 
     # Error details

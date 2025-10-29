@@ -37,13 +37,13 @@ def test_kafka_response_message_creation():
         status_code=200,
         headers={"Content-Type": "application/json"},
         data='{"result": "success"}',
-        is_json=True,
+        is_text=True,
         total_chunks=1
     )
 
     assert msg.job_id == "test-456"
     assert msg.status_code == 200
-    assert msg.is_json is True
+    assert msg.is_text is True
     assert msg.total_chunks == 1
 
 

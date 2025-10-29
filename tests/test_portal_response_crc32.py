@@ -43,15 +43,23 @@ def test_portal_json_response_crc32():
     job_id = "test-json-job"
     service._send_response(job_id, mock_response)
 
-    # Verify message was sent with correct CRC32
-    assert len(sent_messages) == 1
-    response_msg = sent_messages[0]
+    # Verify START and CHUNK messages were sent
+    assert len(sent_messages) == 2
 
-    assert response_msg['job_id'] == job_id
-    assert response_msg['status_code'] == 200
-    assert response_msg['is_json'] is True
-    assert response_msg['crc32'] == expected_crc32
-    assert response_msg['data'] == json_data
+    # Verify START message (metadata only, no data)
+    start_msg = sent_messages[0]
+    assert start_msg['job_id'] == job_id
+    assert start_msg['message_type'] == MessageType.START.value
+    assert start_msg['status_code'] == 200
+    assert start_msg['is_text'] is True
+    assert start_msg['crc32'] == expected_crc32
+    assert start_msg['data'] is None
+
+    # Verify CHUNK message (data only)
+    chunk_msg = sent_messages[1]
+    assert chunk_msg['job_id'] == job_id
+    assert chunk_msg['message_type'] == MessageType.CHUNK.value
+    assert chunk_msg['data'] == json_data
 
 
 def test_portal_binary_response_crc32():
@@ -84,16 +92,23 @@ def test_portal_binary_response_crc32():
     job_id = "test-binary-job"
     service._send_response(job_id, mock_response)
 
-    # Verify message was sent with correct CRC32
-    assert len(sent_messages) == 1
-    response_msg = sent_messages[0]
+    # Verify START and CHUNK messages were sent
+    assert len(sent_messages) == 2
 
-    assert response_msg['job_id'] == job_id
-    assert response_msg['status_code'] == 200
-    assert response_msg['is_json'] is False
-    assert response_msg['crc32'] == expected_crc32
-    # Data should be base64 encoded
-    assert response_msg['data'] == encode_chunk(binary_data)
+    # Verify START message (metadata only, no data)
+    start_msg = sent_messages[0]
+    assert start_msg['job_id'] == job_id
+    assert start_msg['message_type'] == MessageType.START.value
+    assert start_msg['status_code'] == 200
+    assert start_msg['is_text'] is False
+    assert start_msg['crc32'] == expected_crc32
+    assert start_msg['data'] is None
+
+    # Verify CHUNK message (data only, base64 encoded)
+    chunk_msg = sent_messages[1]
+    assert chunk_msg['job_id'] == job_id
+    assert chunk_msg['message_type'] == MessageType.CHUNK.value
+    assert chunk_msg['data'] == encode_chunk(binary_data)
 
 
 def test_portal_large_response_crc32():
@@ -178,14 +193,17 @@ def test_portal_pdf_response_crc32():
     job_id = "test-pdf-job"
     service._send_response(job_id, mock_response)
 
-    # Verify message was sent with correct CRC32
-    assert len(sent_messages) == 1
-    response_msg = sent_messages[0]
+    # Verify START and CHUNK messages were sent
+    assert len(sent_messages) == 2
 
-    assert response_msg['job_id'] == job_id
-    assert response_msg['status_code'] == 200
-    assert response_msg['is_json'] is False  # PDF is not JSON
-    assert response_msg['crc32'] == expected_crc32
+    # Verify START message (metadata only, no data)
+    start_msg = sent_messages[0]
+    assert start_msg['job_id'] == job_id
+    assert start_msg['message_type'] == MessageType.START.value
+    assert start_msg['status_code'] == 200
+    assert start_msg['is_text'] is False  # PDF is binary, not text
+    assert start_msg['crc32'] == expected_crc32
+    assert start_msg['data'] is None
 
 
 def test_portal_empty_response_crc32():
@@ -219,13 +237,23 @@ def test_portal_empty_response_crc32():
     job_id = "test-empty-job"
     service._send_response(job_id, mock_response)
 
-    # Verify message was sent with CRC32 of empty data
-    assert len(sent_messages) == 1
-    response_msg = sent_messages[0]
+    # Verify START and CHUNK messages were sent (even for empty response)
+    assert len(sent_messages) == 2
 
-    assert response_msg['job_id'] == job_id
-    assert response_msg['status_code'] == 204
-    assert response_msg['crc32'] == expected_crc32
+    # Verify START message (metadata only, no data)
+    start_msg = sent_messages[0]
+    assert start_msg['job_id'] == job_id
+    assert start_msg['message_type'] == MessageType.START.value
+    assert start_msg['status_code'] == 204
+    assert start_msg['crc32'] == expected_crc32
+    assert start_msg['is_text'] is True  # text/plain is text
+    assert start_msg['data'] is None
+
+    # Verify CHUNK message (with empty data)
+    chunk_msg = sent_messages[1]
+    assert chunk_msg['job_id'] == job_id
+    assert chunk_msg['message_type'] == MessageType.CHUNK.value
+    assert chunk_msg['data'] == ""  # Empty string
 
 
 def test_portal_unicode_json_response_crc32():
@@ -260,10 +288,19 @@ def test_portal_unicode_json_response_crc32():
     job_id = "test-unicode-job"
     service._send_response(job_id, mock_response)
 
-    # Verify message was sent with correct CRC32
-    assert len(sent_messages) == 1
-    response_msg = sent_messages[0]
+    # Verify START and CHUNK messages were sent
+    assert len(sent_messages) == 2
 
-    assert response_msg['job_id'] == job_id
-    assert response_msg['crc32'] == expected_crc32
-    assert response_msg['is_json'] is True
+    # Verify START message (metadata only, no data)
+    start_msg = sent_messages[0]
+    assert start_msg['job_id'] == job_id
+    assert start_msg['message_type'] == MessageType.START.value
+    assert start_msg['crc32'] == expected_crc32
+    assert start_msg['is_text'] is True
+    assert start_msg['data'] is None
+
+    # Verify CHUNK message (data only)
+    chunk_msg = sent_messages[1]
+    assert chunk_msg['job_id'] == job_id
+    assert chunk_msg['message_type'] == MessageType.CHUNK.value
+    assert chunk_msg['data'] == json_data

@@ -22,7 +22,7 @@ class ResponseState:
         self.total_chunks: Optional[int] = None
         self.status_code: Optional[int] = None
         self.headers: Optional[Dict[str, str]] = None
-        self.is_json: bool = False
+        self.is_text: bool = False
         self.expected_crc32: Optional[int] = None
         self.error_message: Optional[str] = None
 
@@ -56,8 +56,8 @@ class ResponseState:
         # Verify CRC32 checksum if provided
         if self.expected_crc32 is not None:
             # Calculate CRC32 of the raw bytes
-            if self.is_json:
-                # For JSON, calculate CRC32 of UTF-8 encoded text
+            if self.is_text:
+                # For text-based responses (JSON, plain text, HTML), calculate CRC32 of UTF-8 encoded text
                 raw_bytes = complete_data.encode('utf-8')
             else:
                 # For binary data, decode base64 first
@@ -205,7 +205,7 @@ class KafkaReceiver:
         if response.crc32 is not None:
             state.expected_crc32 = response.crc32
 
-        state.is_json = response.is_json
+        state.is_text = response.is_text
 
         # Add chunk data
         if response.data:

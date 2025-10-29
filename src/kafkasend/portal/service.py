@@ -141,8 +141,6 @@ class PortalService:
                 self._handle_start(message)
             elif message.message_type == MessageType.CHUNK:
                 self._handle_chunk(message)
-            elif message.message_type == MessageType.END:
-                self._handle_end(message)
             else:
                 logger.warning("Unknown message type", message_type=message.message_type)
 
@@ -214,23 +212,6 @@ class PortalService:
             # Cancel the job
             self.job_manager.cancel_job(message.job_id)
 
-    def _handle_end(self, message: KafkaRequestMessage) -> None:
-        """Handle END message - marks completion without data."""
-        try:
-            job = self.job_manager.get_job(message.job_id)
-            if job and job.is_complete():
-                self._execute_and_respond(job)
-            elif job:
-                logger.warning(
-                    "Received END but job not complete",
-                    job_id=message.job_id,
-                    received=job.received_chunks,
-                    total=job.total_chunks
-                )
-        except Exception as e:
-            logger.error("Error handling end", job_id=message.job_id, error=str(e))
-            self._send_error_response(message.job_id, str(e))
-
     def _execute_and_respond(self, job) -> None:
         """Execute REST request and send response back to Kafka."""
         try:
@@ -256,95 +237,93 @@ class PortalService:
         """
         Send HTTP response back to Kafka response topic.
 
-        For multi-chunk responses, sends a START message with metadata followed by CHUNK messages with data.
-        For single-chunk responses, sends a START message with both metadata and data.
+        Always sends START message with metadata only, followed by CHUNK message(s) with data.
 
         Args:
             job_id: Job identifier
             response: HTTP response object
         """
-        # Check if response is JSON
-        is_json = False
         response_data = response.content
 
         # Calculate CRC32 checksum of raw response data
         response_crc32 = zlib.crc32(response_data) & 0xffffffff
 
-        content_type = response.headers.get('Content-Type', '')
-        if 'application/json' in content_type:
-            is_json = True
-            # For JSON, send as text
+        # Determine if response is text-based (JSON, plain text, HTML) or binary
+        is_text = self._is_text_response(response.headers.get('Content-Type', ''))
+
+        if is_text:
+            # For text-based responses, send as plain text (no base64 encoding)
             response_text = response.text
         else:
-            # For binary, encode as base64
+            # For binary responses, encode as base64
             response_text = encode_chunk(response_data)
 
-        # Check if we need to chunk the response
+        # Calculate number of data chunks needed
         response_size = len(response_text)
-        needs_chunking = response_size > MAX_CHUNK_SIZE
+        data_chunks = max(1, (response_size + MAX_CHUNK_SIZE - 1) // MAX_CHUNK_SIZE)
 
-        if needs_chunking:
-            # Calculate number of data chunks needed
-            data_chunks = (response_size + MAX_CHUNK_SIZE - 1) // MAX_CHUNK_SIZE
+        # Always send START message with metadata only (no data)
+        start_message = KafkaResponseMessage(
+            job_id=job_id,
+            message_type=MessageType.START,
+            sequence=0,
+            total_chunks=data_chunks,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            is_text=is_text,
+            crc32=response_crc32
+        )
+        self._send_kafka_message(start_message)
 
-            # Send START message with metadata (no data)
-            start_message = KafkaResponseMessage(
+        # Send CHUNK messages with data
+        for i in range(data_chunks):
+            start = i * MAX_CHUNK_SIZE
+            end = min(start + MAX_CHUNK_SIZE, response_size)
+            chunk_data = response_text[start:end]
+
+            chunk_message = KafkaResponseMessage(
                 job_id=job_id,
-                message_type=MessageType.START,
-                sequence=0,
-                total_chunks=data_chunks,  # Total data-bearing chunks
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                is_json=is_json,
-                crc32=response_crc32
-            )
-            self._send_kafka_message(start_message)
-
-            # Send CHUNK messages with data only
-            for i in range(data_chunks):
-                start = i * MAX_CHUNK_SIZE
-                end = min(start + MAX_CHUNK_SIZE, response_size)
-                chunk_data = response_text[start:end]
-
-                chunk_message = KafkaResponseMessage(
-                    job_id=job_id,
-                    message_type=MessageType.CHUNK,
-                    sequence=i,  # Sequence matches chunk number (0-based)
-                    total_chunks=data_chunks,
-                    data=chunk_data
-                )
-
-                self._send_kafka_message(chunk_message)
-
-            logger.info(
-                "Response sent",
-                job_id=job_id,
-                status_code=response.status_code,
+                message_type=MessageType.CHUNK,
+                sequence=i,
                 total_chunks=data_chunks,
-                crc32=response_crc32
-            )
-        else:
-            # Send single START message with metadata and data
-            message = KafkaResponseMessage(
-                job_id=job_id,
-                message_type=MessageType.START,
-                sequence=0,
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                data=response_text,
-                is_json=is_json,
-                crc32=response_crc32,
-                total_chunks=1
+                data=chunk_data
             )
 
-            self._send_kafka_message(message)
+            self._send_kafka_message(chunk_message)
 
-            logger.info(
-                "Response sent",
-                job_id=job_id,
-                status_code=response.status_code,
-                crc32=response_crc32
-            )
+        logger.info(
+            "Response sent",
+            job_id=job_id,
+            status_code=response.status_code,
+            total_chunks=data_chunks,
+            is_text=is_text,
+            crc32=response_crc32
+        )
+
+    def _is_text_response(self, content_type: str) -> bool:
+        """
+        Determine if response content type is text-based.
+
+        Args:
+            content_type: Content-Type header value
+
+        Returns:
+            True if text-based (JSON, plain text, HTML, XML), False if binary
+        """
+        content_type_lower = content_type.lower()
+
+        text_types = [
+            'application/json',
+            'text/plain',
+            'text/html',
+            'text/xml',
+            'application/xml',
+            'text/css',
+            'text/javascript',
+            'application/javascript',
+        ]
+
+        return any(text_type in content_type_lower for text_type in text_types)
 
     def _send_error_response(self, job_id: str, error_message: str) -> None:
         """
