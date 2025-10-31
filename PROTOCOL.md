@@ -524,7 +524,7 @@ graph TB
         API[REST API Server]
     end
 
-    C -->|key=job_id<br/>→ Partition 1| KR
+    C -->|key=job_id| KR
     KR -->|Consumer Group<br/>Partition Assignment| P2
     P2 --> API
     API --> P2
