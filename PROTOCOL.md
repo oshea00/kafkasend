@@ -16,6 +16,15 @@ KafkaSend uses a chunked message protocol to enable large file transfers (up to 
 ## Architecture
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#666666'
+      mainBkg: '#ffffff'
+    
+---
 graph LR
     A[Client CLI] -->|api-requests<br/>Kafka Topic| B[Portal Service<br/>Bridge]
     B -->|api-responses<br/>Kafka Topic| A
@@ -142,6 +151,16 @@ This ensures **complete data integrity** from client through Kafka to portal to 
 ### How It Works
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#666666'
+      mainBkg: '#ffffff'
+      textColor: '#888888'
+    
+---
 sequenceDiagram
     participant C as Client
     participant KReq as Kafka<br/>api-requests
@@ -257,6 +276,16 @@ def get_complete_data(self) -> bytes:
 The portal calculates CRC32 checksums for **all** REST API responses and sends them back to the client for verification.
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#666666'
+      mainBkg: '#ffffff'
+      textColor: '#888888'
+    
+---
 sequenceDiagram
     participant C as Client
     participant KReq as Kafka<br/>api-requests
@@ -504,6 +533,16 @@ KafkaSend supports running multiple portal instances for high availability and l
 ### How It Works
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#888888'
+      mainBkg: '#f1ededff'
+      textColor: '#888888'
+    
+---
 graph TB
     subgraph "Client"
         C[Client CLI<br/>job_id: abc-123]
@@ -593,6 +632,16 @@ portal-2:
 ### Single-Chunk Upload (Small File)
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#888888'
+      mainBkg: '#f1ededff'
+      textColor: '#888888'
+    
+---
 sequenceDiagram
     participant C as Client CLI
     participant KR as Kafka<br/>(api-requests)
@@ -619,6 +668,16 @@ sequenceDiagram
 ### Multi-Chunk Upload (Large File)
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#888888'
+      mainBkg: '#f1ededff'
+      textColor: '#888888'
+    
+---
 sequenceDiagram
     participant C as Client CLI
     participant KR as Kafka<br/>(api-requests)
@@ -653,6 +712,16 @@ sequenceDiagram
 ### Simple Request (No Body)
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#888888'
+      mainBkg: '#f1ededff'
+      textColor: '#888888'
+    
+---
 sequenceDiagram
     participant C as Client CLI
     participant KR as Kafka<br/>(api-requests)
@@ -673,6 +742,16 @@ sequenceDiagram
 When the REST API returns a large response (> 650KB), the portal automatically chunks it:
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#888888'
+      mainBkg: '#f1ededff'
+      textColor: '#888888'
+    
+---
 sequenceDiagram
     participant C as Client CLI
     participant KR as Kafka<br/>(api-requests)
@@ -720,6 +799,16 @@ sequenceDiagram
 ### Error Handling
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#888888'
+      mainBkg: '#f1ededff'
+      textColor: '#888888'
+    
+---
 sequenceDiagram
     participant C as Client CLI
     participant KR as Kafka<br/>(api-requests)
@@ -985,6 +1074,16 @@ CHUNK message (data):
 ## Job State Machine
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#888888'
+      mainBkg: '#f1ededff'
+      textColor: '#888888'
+    
+---
 stateDiagram-v2
     [*] --> Started: START message
     Started --> Accumulating: CHUNK messages
@@ -1153,6 +1252,16 @@ request_timeout_ms: int = 120000        # 2 minutes
 #### Timeout Interaction
 
 ```mermaid
+---
+  config:
+    theme: 'base'
+    themeVariables:
+      darkMode: false
+      lineColor: '#888888'
+      mainBkg: '#f1ededff'
+      textColor: '#888888'
+    
+---
 sequenceDiagram
     participant C as Client
     participant KReq as Kafka<br/>api-requests
